@@ -1,6 +1,6 @@
-# Worklog Telegram-Gemini Bot
+# SimpleClaw
 
-A personal assistant bot that runs as a Telegram daemon, powered by Google Gemini. It manages work items, monitors Ray training jobs, updates daily logs, and answers technical questions.
+A personal assistant daemon that connects Telegram to Google Gemini with native function calling. Enqueue tasks via chat, and the agent executes them using configurable tools — file ops, shell commands, web search, scheduled jobs, and more.
 
 ## Architecture
 

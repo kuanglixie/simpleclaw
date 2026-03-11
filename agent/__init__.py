@@ -1,2 +1,2 @@
-"""Worklog Telegram-Gemini daemon."""
+"""SimpleClaw — Telegram-Gemini personal agent daemon."""
 
