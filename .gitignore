@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+.agent_mailbox/
+*.db
+*.sqlite3
+config.env
+.env
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.DS_Store
