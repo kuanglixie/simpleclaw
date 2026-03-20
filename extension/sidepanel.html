@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SimpleClaw</title>
+  <link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+  <header>
+    <div class="header-top">
+      <h1>SimpleClaw</h1>
+      <span id="statusDot" class="status-dot disconnected" title="Disconnected"></span>
+    </div>
+    <div id="tabsBar" class="tabs-bar"></div>
+    <button id="pinActiveBtn" class="pin-btn">Pin active tab</button>
+  </header>
+
+  <main id="log" class="log"></main>
+
+  <footer>
+    <form id="inputForm">
+      <select id="tabSelect" title="Target tab">
+        <option value="">No tab</option>
+      </select>
+      <input type="text" id="promptInput" placeholder="Tell simplebot what to do..." autocomplete="off">
+      <button type="submit" id="sendBtn">Send</button>
+    </form>
+    <button id="settingsToggle" class="settings-toggle" title="Settings">&#9881;</button>
+    <div id="settingsPanel" class="settings-panel hidden">
+      <label>
+        Host
+        <input type="text" id="hostInput" placeholder="127.0.0.1">
+      </label>
+      <label>
+        Port
+        <input type="number" id="portInput" placeholder="18790">
+      </label>
+      <button id="saveSettings">Save &amp; Reconnect</button>
+      <button id="reloadExtBtn" style="margin-top:8px;background:#c62828;color:#fff;border:none;padding:6px 12px;border-radius:4px;cursor:pointer">Reload Extension</button>
+    </div>
+  </footer>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>

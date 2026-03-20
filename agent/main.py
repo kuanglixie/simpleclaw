@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import signal
 import sys
 from pathlib import Path
@@ -11,12 +12,11 @@ if __package__ in (None, ""):
 from agent.config import Settings, load_settings
 from agent.context import ContextAssembler
 from agent.cron import CronStore
-from agent.gemini import GeminiExecutor, VertexConfig
 from agent.notifier import Notifier
-from agent.orchestrator import Orchestrator
+from agent.orchestrator import SYSTEM_INSTRUCTION, Orchestrator
+from agent.pydantic_agent import create_agent
 from agent.queue import TaskQueue
 from agent.telegram_bot import WorklogTelegramBot
-from agent.tools.declarations import get_all_declarations
 
 
 def _ensure_dirs(settings: Settings) -> None:
@@ -29,29 +29,55 @@ def _ensure_dirs(settings: Settings) -> None:
     settings.cron_dir.mkdir(parents=True, exist_ok=True)
 
 
+def _export_vertex_env(settings: Settings) -> None:
+    """Ensure Vertex AI env vars are set for PydanticAI's GoogleVertexModel."""
+    if settings.gemini_use_vertexai:
+        if settings.gemini_vertex_project:
+            os.environ.setdefault("GOOGLE_CLOUD_PROJECT", settings.gemini_vertex_project)
+        if settings.gemini_vertex_location:
+            os.environ.setdefault("GOOGLE_CLOUD_LOCATION", settings.gemini_vertex_location)
+
+
 async def run() -> None:
     settings = load_settings()
     _ensure_dirs(settings)
+    _export_vertex_env(settings)
 
     queue = TaskQueue(settings.db_path, poll_interval_seconds=settings.queue_poll_interval_seconds)
     await queue.init()
 
     cron_store = CronStore(settings.cron_dir / "jobs.json") if settings.cron_enabled else None
 
-    gemini = GeminiExecutor(
-        model=settings.gemini_model,
-        timeout_seconds=settings.gemini_timeout_seconds,
-        vertex=VertexConfig(
-            enabled=settings.gemini_use_vertexai,
-            project=settings.gemini_vertex_project,
-            location=settings.gemini_vertex_location,
-        ),
-        tool_declarations=get_all_declarations(),
+    browser_server = None
+    include_browser = False
+
+    if settings.browser_server_enabled:
+        from agent.browser_server import BrowserServer
+        from agent.tools.browser import set_browser_server
+
+        browser_server = BrowserServer(
+            host=settings.browser_server_host,
+            port=settings.browser_server_port,
+            token=settings.browser_server_token,
+            queue=queue,
+        )
+        set_browser_server(browser_server)
+        await browser_server.start()
+        include_browser = True
+
+    system_instruction = SYSTEM_INSTRUCTION.format(
+        worklog_dir=settings.worklog_dir,
     )
+    agent = create_agent(
+        model=settings.pydantic_ai_model,
+        system_instruction=system_instruction,
+        include_browser=include_browser,
+    )
+
     context_assembler = ContextAssembler(settings.worklog_dir, settings.data_dir)
     notifier = Notifier(settings.telegram_bot_token)
     orchestrator = Orchestrator(
-        settings, queue, gemini, context_assembler, notifier,
+        settings, queue, agent, context_assembler, notifier,
         cron_store=cron_store,
     )
     telegram_bot = WorklogTelegramBot(
@@ -85,6 +111,8 @@ async def run() -> None:
         t.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
     await telegram_bot.stop()
+    if browser_server is not None:
+        await browser_server.stop()
 
 
 def main() -> None:

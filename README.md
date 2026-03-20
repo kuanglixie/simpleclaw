@@ -1,11 +1,15 @@
 # SimpleClaw
 
-A personal assistant daemon that connects Telegram to Google Gemini with native function calling. Enqueue tasks via chat, and the agent executes them using configurable tools — file ops, shell commands, web search, scheduled jobs, and more.
+A personal assistant daemon that connects Telegram to Google Gemini via
+[PydanticAI](https://ai.pydantic.dev/). Enqueue tasks via chat, and the agent
+executes them using type-safe tools — file ops, shell commands, web search,
+scheduled jobs, and more.
 
 ## Architecture
 
+- **PydanticAI Agent** handles the LLM loop, tool dispatch, and schema generation
 - **Telegram bot** receives messages and enqueues tasks in SQLite
-- **Orchestrator** processes tasks using Gemini with native function calling
+- **Orchestrator** wires tasks to the PydanticAI agent with context assembly
 - **Heartbeat** runs periodic check-ins on a configurable interval
 - **Cron scheduler** supports one-shot, recurring, and cron-expression jobs
 - **Context compaction** summarizes old conversation history to prevent context overflow
@@ -13,7 +17,7 @@ A personal assistant daemon that connects Telegram to Google Gemini with native 
 
 ## Prerequisites
 
-- Python 3.9+
+- Python 3.10+
 - Google Gemini API access (or Vertex AI)
 - Telegram bot token from [@BotFather](https://t.me/BotFather)
 

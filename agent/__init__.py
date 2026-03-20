@@ -1,2 +1,2 @@
-"""SimpleClaw — Telegram-Gemini personal agent daemon."""
+"""Personal agent daemon — Telegram + PydanticAI."""
 

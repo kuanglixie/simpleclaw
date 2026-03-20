@@ -34,12 +34,12 @@ class Settings:
     data_dir: Path
     cron_dir: Path
     db_path: Path
-    gemini_bin: str
     gemini_model: str
     gemini_timeout_seconds: int
     gemini_use_vertexai: bool
     gemini_vertex_project: str
     gemini_vertex_location: str
+    pydantic_ai_model: str
     max_agent_steps: int
     tool_timeout_seconds: int
     monitor_interval_seconds: int
@@ -60,6 +60,11 @@ class Settings:
     compaction_max_session_messages: int
     compaction_keep_recent: int
     compaction_max_context_chars: int
+    # Browser extension relay
+    browser_server_enabled: bool
+    browser_server_host: str
+    browser_server_port: int
+    browser_server_token: str
 
 
 def load_settings() -> Settings:
@@ -84,7 +89,7 @@ def load_settings() -> Settings:
     monitor_interval_raw = _env(file_env, "MONITOR_INTERVAL_SECONDS", "1800")
     queue_poll_raw = _env(file_env, "QUEUE_POLL_INTERVAL_SECONDS", "2")
     timeout_raw = _env(file_env, "GEMINI_TIMEOUT_SECONDS", "300")
-    max_steps_raw = _env(file_env, "MAX_AGENT_STEPS", "6")
+    max_steps_raw = _env(file_env, "MAX_AGENT_STEPS", "12")
     tool_timeout_raw = _env(file_env, "TOOL_TIMEOUT_SECONDS", "180")
     try:
         monitor_interval = int(monitor_interval_raw)
@@ -119,6 +124,15 @@ def load_settings() -> Settings:
     compaction_keep = _safe_int(_env(file_env, "COMPACTION_KEEP_RECENT", "12"), 12)
     compaction_max_chars = _safe_int(_env(file_env, "COMPACTION_MAX_CONTEXT_CHARS", "80000"), 80000)
 
+    browser_enabled = _env(file_env, "BROWSER_SERVER_ENABLED", "false").lower() in ("true", "1", "yes")
+    browser_host = _env(file_env, "BROWSER_SERVER_HOST", "127.0.0.1")
+    browser_port = _safe_int(_env(file_env, "BROWSER_SERVER_PORT", "18790"), 18790)
+    browser_token = _env(file_env, "BROWSER_SERVER_TOKEN", "")
+
+    gemini_model = _env(file_env, "GEMINI_MODEL", "gemini-3.1-pro")
+    prefix = "google-vertex" if use_vertexai else "google-gla"
+    pai_model = _env(file_env, "PYDANTIC_AI_MODEL", f"{prefix}:{gemini_model}")
+
     return Settings(
         worklog_dir=worklog_dir,
         mailbox_dir=mailbox_dir,
@@ -129,12 +143,12 @@ def load_settings() -> Settings:
         data_dir=mailbox_dir / "data",
         cron_dir=mailbox_dir / "cron",
         db_path=mailbox_dir / "state.db",
-        gemini_bin=_env(file_env, "GEMINI_BIN", "gemini"),
-        gemini_model=_env(file_env, "GEMINI_MODEL", "gemini-3.1-pro"),
+        gemini_model=gemini_model,
         gemini_timeout_seconds=timeout,
         gemini_use_vertexai=use_vertexai,
         gemini_vertex_project=_env(file_env, "GOOGLE_CLOUD_PROJECT", ""),
         gemini_vertex_location=_env(file_env, "GOOGLE_CLOUD_LOCATION", "us-central1"),
+        pydantic_ai_model=pai_model,
         max_agent_steps=max(1, max_steps),
         tool_timeout_seconds=max(10, tool_timeout),
         monitor_interval_seconds=monitor_interval,
@@ -152,6 +166,10 @@ def load_settings() -> Settings:
         compaction_max_session_messages=compaction_max_msgs,
         compaction_keep_recent=compaction_keep,
         compaction_max_context_chars=compaction_max_chars,
+        browser_server_enabled=browser_enabled,
+        browser_server_host=browser_host,
+        browser_server_port=browser_port,
+        browser_server_token=browser_token,
     )
 
 

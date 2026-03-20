@@ -1,4 +1,4 @@
-"""Orchestrator: agent loop using native Gemini function calling.
+"""Orchestrator: task processing using PydanticAI agent with native tool calling.
 
 Includes heartbeat (periodic check-ins), cron job scheduling,
 and context compaction for long sessions.
@@ -8,16 +8,17 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
-from pathlib import Path
 from uuid import uuid4
 
-from google.genai import types
+from pydantic_ai import Agent
+from pydantic_ai.exceptions import UnexpectedModelBehavior, UsageLimitExceeded
+from pydantic_ai.messages import ToolCallPart, ToolReturnPart
+from pydantic_ai.usage import UsageLimits
 
 from .compaction import CompactionConfig, compact_session, needs_compaction
 from .config import Settings
 from .context import ContextAssembler
 from .cron import CronStore, get_due_jobs
-from .gemini import GeminiExecutor
 from .heartbeat import (
     ActiveHours,
     HeartbeatConfig,
@@ -28,21 +29,9 @@ from .heartbeat import (
 )
 from .models import Task, TaskStatus, new_task_id
 from .notifier import Notifier
-from .output_contract import OutputContract, write_contract
+from .output_contract import OutputContract, ToolCallRecord, write_contract
+from .pydantic_agent import AgentDeps
 from .queue import TaskQueue
-from .tools.executor import ToolExecutor
-
-
-def _now_iso() -> str:
-    return datetime.now(tz=timezone.utc).replace(microsecond=0).isoformat()
-
-
-def _summary_from_text(text: str) -> str:
-    for line in text.splitlines():
-        clean = line.strip()
-        if clean:
-            return clean[:300]
-    return "(empty response)"
 
 
 SYSTEM_INSTRUCTION = """\
@@ -58,10 +47,14 @@ Your workspace is at {worklog_dir} which contains:
 - HEARTBEAT.md: Heartbeat check-in checklist
 - scripts/: Utility scripts including Ray job management
 - knowledge-base/: Reference docs and experiment notes
+- cursor-conversations/: Cursor IDE chat history as .jsonl files. \
+  index.md maps UUIDs to first-line summaries. Each .jsonl has one JSON \
+  object per line with "role" and "message" fields. Use grep_search to \
+  find conversations by keyword, then read_file to get full content.
 
 Guidelines:
-- Use read_file, edit_file, grep_search, glob_files instead of shell when \
-  doing file operations. Reserve shell for git, kubectl, gazette, and other \
+- Use read_file, edit_file, grep_search, glob_files instead of run_shell when \
+  doing file operations. Reserve run_shell for git, kubectl, gazette, and other \
   system commands.
 - For TODO operations, use add_todo and read_todo instead of raw file editing.
 - For Ray job monitoring, use check_ray_jobs and ray_job_describe.
@@ -71,7 +64,32 @@ Guidelines:
   across sessions and compaction — use it proactively.
 - Be concise in your final answers — they go to Telegram.
 - When you have enough information to answer, just answer. Don't over-tool.
+
+Action execution rules (CRITICAL):
+- When the user asks you to FIX, UPDATE, or CHANGE something, you MUST \
+  actually edit the file using edit_file or write_file. Never just say \
+  "I will do this" or "I have updated my procedures" without making the \
+  actual file change. Verbal acknowledgment alone is NOT acceptable.
+- When the user says "yes", "do it", "go ahead", or similar confirmations, \
+  treat it as approval to execute the action you most recently proposed. \
+  Look at the conversation history to find what you offered to do.
+- If a task requires editing a skill or config file, read the file first, \
+  then edit it. Don't substitute a memory_write for an actual file edit.
+- Report what you actually DID, not what you plan to do. Distinguish between \
+  "I changed X" (file was edited) and "I noted X" (memory only).
 """
+
+
+def _now_iso() -> str:
+    return datetime.now(tz=timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _summary_from_text(text: str) -> str:
+    for line in text.splitlines():
+        clean = line.strip()
+        if clean:
+            return clean[:300]
+    return "(empty response)"
 
 
 class Orchestrator:
@@ -79,25 +97,17 @@ class Orchestrator:
         self,
         settings: Settings,
         queue: TaskQueue,
-        gemini: GeminiExecutor,
+        agent: Agent[AgentDeps],
         context_assembler: ContextAssembler,
         notifier: Notifier,
         cron_store: CronStore | None = None,
     ) -> None:
         self.settings = settings
         self.queue = queue
-        self.gemini = gemini
+        self.agent = agent
         self.context_assembler = context_assembler
         self.notifier = notifier
         self.cron_store = cron_store
-        self.tool_executor = ToolExecutor(
-            worklog_dir=settings.worklog_dir,
-            shell_timeout=settings.tool_timeout_seconds,
-            cron_store=cron_store,
-        )
-        self._system_instruction = SYSTEM_INSTRUCTION.format(
-            worklog_dir=settings.worklog_dir,
-        )
         self._heartbeat_config = HeartbeatConfig(
             enabled=settings.heartbeat_enabled,
             every_seconds=settings.heartbeat_every_seconds,
@@ -129,7 +139,6 @@ class Orchestrator:
     async def _execute_task(self, task: Task, started_at: str) -> None:
         session_key = task.session_key or ""
 
-        # --- Context compaction before building context ---
         if session_key and self._compaction_config.enabled:
             await self._maybe_compact(session_key)
 
@@ -141,69 +150,47 @@ class Orchestrator:
         )
         await self.queue.update_task(task.id, context=context_blob)
 
+        user_prompt = f"{context_blob}\n\n---\nTask: {task.prompt}"
+        deps = AgentDeps(
+            worklog_dir=self.settings.worklog_dir,
+            shell_timeout=self.settings.tool_timeout_seconds,
+            cron_store=self.cron_store,
+        )
+
         errors: list[str] = []
-        tool_records = []
+        tool_records: list[ToolCallRecord] = []
         final_answer = ""
         summary = ""
         status = TaskStatus.FAILED
         is_heartbeat = task.source == "heartbeat"
 
-        user_prompt = f"{context_blob}\n\n---\nTask: {task.prompt}"
-        contents: list = [
-            types.Content(
-                role="user",
-                parts=[types.Part.from_text(text=user_prompt)],
-            ),
-        ]
-
-        for step in range(1, self.settings.max_agent_steps + 1):
-            gemini_result = await self.gemini.generate_with_tools(
-                contents, system_instruction=self._system_instruction,
+        try:
+            result = await self.agent.run(
+                user_prompt,
+                deps=deps,
+                usage_limits=UsageLimits(
+                    request_limit=self.settings.max_agent_steps,
+                ),
             )
+            final_answer = str(result.output).strip()
+            summary = _summary_from_text(final_answer)
+            tool_records = _extract_tool_records(result)
+            status = TaskStatus.COMPLETED
 
-            if gemini_result.return_code != 0:
-                err_msg = gemini_result.stderr.strip() or "Gemini call failed"
-                errors.append(err_msg)
-                final_answer = gemini_result.text.strip() or err_msg
-                summary = _summary_from_text(final_answer)
-                status = TaskStatus.FAILED
-                break
-
-            if gemini_result.function_calls:
-                if gemini_result.raw_content:
-                    contents.append(gemini_result.raw_content)
-
-                fn_response_parts = []
-                for fc in gemini_result.function_calls:
-                    tool_result = await self.tool_executor.execute(fc.name, fc.args)
-                    tool_records.append(tool_result.record)
-
-                    if not tool_result.success:
-                        errors.append(_summary_from_text(tool_result.output))
-
-                    fn_response_parts.append(
-                        types.Part.from_function_response(
-                            name=fc.name,
-                            response={
-                                "result": tool_result.output[:4000],
-                                "success": tool_result.success,
-                            },
-                        ),
-                    )
-
-                contents.append(types.Content(parts=fn_response_parts))
-            else:
-                final_answer = gemini_result.text.strip()
-                summary = _summary_from_text(final_answer)
-                status = TaskStatus.COMPLETED
-                break
-        else:
+        except UsageLimitExceeded:
             status = TaskStatus.FAILED
             errors.append(
                 f"Agent loop exceeded max steps ({self.settings.max_agent_steps}).",
             )
-            final_answer = final_answer or "Task did not converge within step limit."
-            summary = summary or "Task stopped at max agent steps."
+            final_answer = "Task did not converge within step limit."
+            summary = "Task stopped at max agent steps."
+
+        except (UnexpectedModelBehavior, Exception) as exc:  # noqa: BLE001
+            status = TaskStatus.FAILED
+            err_msg = str(exc).strip() or "Agent execution failed"
+            errors.append(err_msg)
+            final_answer = err_msg
+            summary = _summary_from_text(err_msg)
 
         # --- Heartbeat: suppress HEARTBEAT_OK responses ---
         if is_heartbeat and status == TaskStatus.COMPLETED:
@@ -211,7 +198,7 @@ class Orchestrator:
                 await self.queue.update_task(
                     task.id, status=TaskStatus.COMPLETED, result="HEARTBEAT_OK",
                 )
-                return  # silently drop
+                return
 
             final_answer = strip_heartbeat_token(final_answer)
 
@@ -284,14 +271,14 @@ class Orchestrator:
             return
         await compact_session(
             session_key, messages, self._compaction_config,
-            self.gemini, self.queue,
+            model=self.settings.pydantic_ai_model,
+            queue=self.queue,
             worklog_dir=self.settings.worklog_dir,
         )
 
-    # --- Heartbeat loop (replaces old scheduler_loop) ---
+    # --- Heartbeat loop ---
 
     async def heartbeat_loop(self) -> None:
-        """Periodic heartbeat check-ins using HEARTBEAT.md."""
         if not self._heartbeat_config.enabled:
             return
         while True:
@@ -325,11 +312,10 @@ class Orchestrator:
     # --- Cron job loop ---
 
     async def cron_loop(self) -> None:
-        """Check for due cron jobs and enqueue them."""
         if not self.settings.cron_enabled or self.cron_store is None:
             return
         while True:
-            await asyncio.sleep(30)  # check every 30s
+            await asyncio.sleep(30)
             try:
                 due = await asyncio.to_thread(get_due_jobs, self.cron_store)
                 for job in due:
@@ -347,3 +333,52 @@ class Orchestrator:
                     )
             except Exception:  # noqa: BLE001
                 pass
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _extract_tool_records(result) -> list[ToolCallRecord]:
+    """Build ToolCallRecords from PydanticAI's message history."""
+    calls: dict[str, tuple[str, dict]] = {}
+    records: list[ToolCallRecord] = []
+
+    for msg in result.all_messages():
+        for part in msg.parts:
+            if isinstance(part, ToolCallPart):
+                calls[part.tool_call_id] = (
+                    part.tool_name,
+                    dict(part.args) if part.args else {},
+                )
+            elif isinstance(part, ToolReturnPart):
+                call_info = calls.get(part.tool_call_id)
+                name = call_info[0] if call_info else part.tool_name
+                args = call_info[1] if call_info else {}
+                output = str(part.content)[:1500]
+                is_error = output.startswith("Error:") or output.startswith(
+                    "Tool error",
+                )
+                records.append(
+                    ToolCallRecord(
+                        name=name,
+                        input=_format_tool_input(name, args),
+                        output_excerpt=output,
+                        exit_code=1 if is_error else 0,
+                        duration_ms=0,
+                    ),
+                )
+
+    return records
+
+
+def _format_tool_input(name: str, args: dict) -> str:
+    if name == "run_shell":
+        return args.get("command", "")
+    if name == "read_file":
+        return args.get("path", "")
+    if name == "grep_search":
+        return f"{args.get('pattern', '')} in {args.get('path', '.')}"
+    parts = [f"{k}={v!r}" for k, v in args.items()]
+    return ", ".join(parts)[:300]

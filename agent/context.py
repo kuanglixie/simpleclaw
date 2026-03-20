@@ -195,13 +195,15 @@ class ContextAssembler:
             n = len(recent_messages)
             for i, (role, content) in enumerate(recent_messages):
                 label = "User" if role.lower() == "user" else "Assistant"
-                is_recent = i >= n - 4
-                limit = 800 if is_recent else 200
+                is_recent = i >= n - 6
+                limit = 1200 if is_recent else 400
                 parts.append(f"- {label}: {_truncate_text(content, limit)}")
             parts.append(
-                "\nIMPORTANT: If the user's message references something from the "
-                "conversation above (e.g. 'fix this', 'try again', 'do that'), "
-                "resolve the reference using the conversation history."
+                "\nIMPORTANT: The user's new message may be a SHORT follow-up "
+                "(e.g. 'yes', 'do it', 'fix this', 'try again'). In that case "
+                "you MUST resolve what they mean from the conversation above. "
+                "Specifically: if you previously offered to do something and the "
+                "user says 'yes' or 'go ahead', EXECUTE that action now."
             )
 
         if ray_prompt:

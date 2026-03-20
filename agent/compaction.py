@@ -1,22 +1,18 @@
 """Context compaction: summarize older conversation history.
 
-Inspired by OpenClaw's compaction mechanism. When session history grows
-large, older messages are summarized into a compact entry while recent
-messages are kept intact. This prevents context window overflow.
-
-Includes a pre-compaction memory flush: before summarizing, the model
-extracts durable facts and writes them to MEMORY.md so important
-knowledge survives across compaction cycles.
+When session history grows large, older messages are summarized into a
+compact entry while recent messages are kept intact.  Before summarizing,
+the model extracts durable facts and writes them to MEMORY.md.
 """
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from google.genai import types
+from pydantic_ai import Agent
+from pydantic_ai.settings import ModelSettings
 
 
 COMPACTION_MARKER = "[COMPACTED_SUMMARY]"
@@ -54,7 +50,6 @@ class CompactionConfig:
     max_session_messages: int = 40
     keep_recent: int = 12
     max_context_chars: int = 80_000
-    model: str = ""  # empty = use primary model
 
 
 @dataclass
@@ -74,16 +69,14 @@ def needs_compaction(
     if len(messages) > config.max_session_messages:
         return True
     total_chars = sum(len(content) for _, content in messages)
-    if total_chars > config.max_context_chars:
-        return True
-    return False
+    return total_chars > config.max_context_chars
 
 
 async def compact_session(
     session_key: str,
     messages: list[tuple[str, str]],
     config: CompactionConfig,
-    gemini_executor,
+    model: str,
     queue,
     worklog_dir: Path | str | None = None,
 ) -> CompactionResult:
@@ -92,7 +85,7 @@ async def compact_session(
     Flow:
     1. Split messages into old (to compact) and recent (to keep)
     2. Pre-compaction memory flush: extract durable facts into MEMORY.md
-    3. Summarize the old messages using the model
+    3. Summarize the old messages using a lightweight PydanticAI agent
     4. Replace old messages with a single summary message in the DB
     """
     if not needs_compaction(messages, config):
@@ -106,9 +99,9 @@ async def compact_session(
         return CompactionResult(did_compact=False)
 
     if worklog_dir is not None:
-        await _flush_to_memory(old_messages, gemini_executor, config, worklog_dir)
+        await _flush_to_memory(old_messages, model, worklog_dir)
 
-    summary = await _summarize_messages(old_messages, gemini_executor, config)
+    summary = await _summarize_messages(old_messages, model)
     if not summary:
         return CompactionResult(did_compact=False)
 
@@ -134,21 +127,24 @@ async def compact_session(
 
 async def _summarize_messages(
     messages: list[tuple[str, str]],
-    gemini_executor,
-    config: CompactionConfig,
+    model: str,
 ) -> str:
     conversation_text = _format_messages_for_summary(messages)
-
     prompt = (
-        f"{COMPACTION_SYSTEM_PROMPT}\n\n"
         f"--- Conversation to summarize ({len(messages)} turns) ---\n\n"
         f"{conversation_text}"
     )
 
-    result = await gemini_executor.execute(prompt)
-    if result.return_code != 0:
+    summary_agent: Agent[None] = Agent(
+        model,
+        instructions=COMPACTION_SYSTEM_PROMPT,
+        model_settings=ModelSettings(temperature=0.1),
+    )
+    try:
+        result = await summary_agent.run(prompt)
+        return str(result.output).strip()
+    except Exception:  # noqa: BLE001
         return ""
-    return result.text.strip()
 
 
 def _format_messages_for_summary(messages: list[tuple[str, str]]) -> str:
@@ -162,8 +158,7 @@ def _format_messages_for_summary(messages: list[tuple[str, str]]) -> str:
 
 async def _flush_to_memory(
     messages: list[tuple[str, str]],
-    gemini_executor,
-    config: CompactionConfig,
+    model: str,
     worklog_dir: Path | str,
 ) -> None:
     """Pre-compaction memory flush: extract durable facts into MEMORY.md."""
@@ -171,16 +166,21 @@ async def _flush_to_memory(
 
     conversation_text = _format_messages_for_summary(messages)
     prompt = (
-        f"{MEMORY_EXTRACTION_PROMPT}\n\n"
         f"--- Conversation ({len(messages)} turns) ---\n\n"
         f"{conversation_text}"
     )
 
-    result = await gemini_executor.execute(prompt)
-    if result.return_code != 0:
+    extraction_agent: Agent[None] = Agent(
+        model,
+        instructions=MEMORY_EXTRACTION_PROMPT,
+        model_settings=ModelSettings(temperature=0.1),
+    )
+    try:
+        result = await extraction_agent.run(prompt)
+        extracted = str(result.output).strip()
+    except Exception:  # noqa: BLE001
         return
 
-    extracted = result.text.strip()
     if not extracted or extracted == "NOTHING_NEW":
         return
 

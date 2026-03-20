@@ -1,9 +1,4 @@
 """Tool package for the worklog agent.
 
-Provides Claude Code-like tools via native Gemini function calling.
+Tool implementations used by the PydanticAI agent via registered tool functions.
 """
-
-from .executor import ToolExecutor
-from .declarations import get_all_declarations
-
-__all__ = ["ToolExecutor", "get_all_declarations"]

@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "SimpleClaw",
+  "version": "0.2.0",
+  "description": "Browser relay for SimpleClaw agent — pin tabs and let your AI assistant interact with them. v0.2: CDP-first input for React/Slack, smart element prioritization.",
+  "permissions": [
+    "activeTab",
+    "tabs",
+    "sidePanel",
+    "scripting",
+    "storage",
+    "alarms",
+    "debugger"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "https://*/*",
+    "http://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "action": {
+    "default_title": "SimpleClaw — click to pin/unpin tab"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

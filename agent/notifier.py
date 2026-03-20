@@ -31,12 +31,16 @@ class Notifier:
             pass
 
         body = _build_user_facing_body(summary, final_answer)
-        parts = [f"[{status}] {body}"]
-        if status == "failed" and errors:
+
+        if status == "failed":
+            parts = [f"[failed] {body}"]
             error_line = _extract_error_reason(errors)
             if error_line:
                 parts.append(f"\nError: {error_line}")
-        message = "\n".join(parts)
+            message = "\n".join(parts)
+        else:
+            message = body
+
         await self._safe_send(task.telegram_chat_id, message)
 
     async def send_text(self, chat_id: str, message: str) -> None:
@@ -45,40 +49,76 @@ class Notifier:
         await self._safe_send(chat_id, message)
 
     async def _safe_send(self, chat_id: str, text: str) -> None:
-        """Send a message, falling back to plain text if Markdown parsing fails."""
+        """Send with HTML parse mode, fall back to plain text on failure."""
         if not self._bot:
             return
         clamped = _clamp_message(text)
+        html = _markdown_to_html(clamped)
         try:
             await self._bot.send_message(
-                chat_id=chat_id, text=clamped, parse_mode="Markdown",
+                chat_id=chat_id, text=html, parse_mode="HTML",
             )
         except Exception:
-            clean = _strip_markdown(clamped)
-            await self._bot.send_message(chat_id=chat_id, text=clean)
+            plain = _strip_all_markup(clamped)
+            try:
+                await self._bot.send_message(chat_id=chat_id, text=plain)
+            except Exception:
+                pass
 
 
 _TELEGRAM_MSG_LIMIT = 4096
 
 
-def _clamp_message(text: str, limit: int = _TELEGRAM_MSG_LIMIT - 50) -> str:
+def _clamp_message(text: str, limit: int = _TELEGRAM_MSG_LIMIT - 100) -> str:
     if len(text) <= limit:
         return text
-    return text[:limit - 4] + "\n..."
+    return text[: limit - 4] + "\n..."
 
 
-def _strip_markdown(text: str) -> str:
-    """Remove Markdown formatting that Telegram might choke on."""
+def _markdown_to_html(text: str) -> str:
+    """Convert common markdown to Telegram-safe HTML.
+
+    Telegram HTML supports: <b>, <i>, <code>, <pre>, <a>, <s>.
+    Order matters: process fenced blocks first to avoid inner replacements.
+    """
+    result = text
+
+    result = re.sub(
+        r"```(\w*)\n(.*?)```",
+        lambda m: f"<pre>{_escape_html(m.group(2).strip())}</pre>",
+        result,
+        flags=re.DOTALL,
+    )
+    result = re.sub(
+        r"`([^`\n]+?)`",
+        lambda m: f"<code>{_escape_html(m.group(1))}</code>",
+        result,
+    )
+
+    result = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", result)
+    result = re.sub(r"\*(.+?)\*", r"<i>\1</i>", result)
+    result = re.sub(r"~~(.+?)~~", r"<s>\1</s>", result)
+
+    return result
+
+
+def _escape_html(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _strip_all_markup(text: str) -> str:
+    """Remove both markdown and HTML tags for plain-text fallback."""
     cleaned = text
     cleaned = re.sub(r"\*\*(.+?)\*\*", r"\1", cleaned)
     cleaned = re.sub(r"\*(.+?)\*", r"\1", cleaned)
     cleaned = re.sub(r"`(.+?)`", r"\1", cleaned)
     cleaned = re.sub(r"~~(.+?)~~", r"\1", cleaned)
+    cleaned = re.sub(r"<[^>]+>", "", cleaned)
     return cleaned
 
 
 def _build_user_facing_body(summary: str, final_answer: str) -> str:
-    """Pick the best content to show the user — prefer final_answer over summary."""
+    """Pick the best content to show the user -- prefer final_answer over summary."""
     answer = _clean_text(final_answer)
     if answer and len(answer) > 60:
         return answer[:3800]
