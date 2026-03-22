@@ -18,6 +18,7 @@ from pydantic_ai.usage import UsageLimits
 from .compaction import CompactionConfig, compact_session, needs_compaction
 from .config import Settings
 from .context import ContextAssembler
+from .status_snapshot import write_snapshot
 from .cron import CronStore, get_due_jobs
 from .heartbeat import (
     ActiveHours,
@@ -58,12 +59,20 @@ Guidelines:
   system commands.
 - For TODO operations, use add_todo and read_todo instead of raw file editing.
 - For Ray job monitoring, use check_ray_jobs and ray_job_describe.
+- For submitting Ray jobs, use ray_job_submit. NEVER try to run adhoc_job.py \
+  or training scripts locally -- the local machine lacks GPU and the correct \
+  Python environment. Always submit via ray_job_submit(job_name=..., mode=...).
 - For scheduling, use cron_add, cron_list, cron_remove to manage recurring tasks.
 - Use memory_write to persist important facts, preferences, or patterns you \
   learn. Use memory_read to recall stored knowledge. Your memory survives \
   across sessions and compaction — use it proactively.
 - Be concise in your final answers — they go to Telegram.
 - When you have enough information to answer, just answer. Don't over-tool.
+- NEVER report factual claims about task status, PR merges, job progress, \
+  pipeline states, or data backfills without first verifying via a tool call \
+  (read_file, grep_search, check_ray_jobs, etc.). If your tools fail, say \
+  "I could not verify" rather than guessing. Fabricating status updates is \
+  the worst possible failure mode.
 
 Action execution rules (CRITICAL):
 - When the user asks you to FIX, UPDATE, or CHANGE something, you MUST \
@@ -77,6 +86,14 @@ Action execution rules (CRITICAL):
   then edit it. Don't substitute a memory_write for an actual file edit.
 - Report what you actually DID, not what you plan to do. Distinguish between \
   "I changed X" (file was edited) and "I noted X" (memory only).
+
+Multi-item messages:
+- When the user references multiple task numbers (e.g. "42: please do. 44: do it"), \
+  handle each one sequentially. For each item, first read_todo to get context, \
+  then take the action (typically ray_job_submit for experiments). \
+  Prefer finishing fewer items well over starting many and running out of steps.
+- If a TODO item says "submit" or "resubmit" an experiment, use ray_job_submit. \
+  Read the TODO to find the job name (e.g. 'train-and-evaluate-rfe-v2-best-of').
 """
 
 
@@ -141,6 +158,11 @@ class Orchestrator:
 
         if session_key and self._compaction_config.enabled:
             await self._maybe_compact(session_key)
+
+        try:
+            await asyncio.to_thread(write_snapshot, self.settings.worklog_dir)
+        except Exception:  # noqa: BLE001
+            pass
 
         recent_messages = await self.queue.get_recent_session_messages(
             session_key, limit=self._compaction_config.keep_recent + 10,
@@ -286,6 +308,10 @@ class Orchestrator:
             try:
                 if not is_within_active_hours(self._heartbeat_config):
                     continue
+
+                await asyncio.to_thread(
+                    write_snapshot, self.settings.worklog_dir,
+                )
 
                 hb_content = await asyncio.to_thread(
                     read_heartbeat_md, self.settings.worklog_dir,

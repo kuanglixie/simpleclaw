@@ -209,6 +209,31 @@ def create_agent(
         """
         return ray_ops.ray_job_describe(job_id)
 
+    @agent.tool
+    def ray_job_submit(
+        ctx: RunContext[AgentDeps],
+        job_name: str,
+        mode: str = "standalone",
+        path: str = "train",
+        worktree: str = "rfe-v2-features",
+    ) -> str:
+        """Submit a Ray training or evaluation job. This is the ONLY correct way
+        to run ML jobs -- never try to run adhoc_job.py locally.
+
+        Args:
+            job_name: The adhoc job name, e.g. 'train-and-evaluate-rfe-v2-best-of'.
+            mode: 'standalone' (gazette ray job run) or 'workspace' (gazette ray job submit). Default standalone.
+            path: Job path, usually 'train'. Default 'train'.
+            worktree: Git worktree name containing the experiment code. Default 'rfe-v2-features'.
+        """
+        return ray_ops.ray_job_submit(
+            str(ctx.deps.worklog_dir),
+            job_name=job_name,
+            mode=mode,
+            path=path,
+            worktree=worktree,
+        )
+
     # ------------------------------------------------------------------
     # Cron
     # ------------------------------------------------------------------

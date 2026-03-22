@@ -89,7 +89,7 @@ def load_settings() -> Settings:
     monitor_interval_raw = _env(file_env, "MONITOR_INTERVAL_SECONDS", "1800")
     queue_poll_raw = _env(file_env, "QUEUE_POLL_INTERVAL_SECONDS", "2")
     timeout_raw = _env(file_env, "GEMINI_TIMEOUT_SECONDS", "300")
-    max_steps_raw = _env(file_env, "MAX_AGENT_STEPS", "12")
+    max_steps_raw = _env(file_env, "MAX_AGENT_STEPS", "20")
     tool_timeout_raw = _env(file_env, "TOOL_TIMEOUT_SECONDS", "180")
     try:
         monitor_interval = int(monitor_interval_raw)
