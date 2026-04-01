@@ -89,6 +89,11 @@ class CronStore:
             except (json.JSONDecodeError, KeyError):
                 self._jobs = {}
 
+    def reload(self) -> None:
+        """Re-read jobs.json from disk, picking up external edits (e.g. by cursor_agent)."""
+        self._jobs.clear()
+        self._load()
+
     def _save(self) -> None:
         self.store_path.parent.mkdir(parents=True, exist_ok=True)
         data = {"jobs": [j.to_dict() for j in self._jobs.values()]}

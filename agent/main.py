@@ -93,6 +93,7 @@ async def run() -> None:
     tasks = [
         asyncio.create_task(orchestrator.process_loop(), name="process-loop"),
         asyncio.create_task(orchestrator.heartbeat_loop(), name="heartbeat-loop"),
+        asyncio.create_task(orchestrator.self_improve_loop(), name="self-improve-loop"),
     ]
     if cron_store is not None:
         tasks.append(asyncio.create_task(orchestrator.cron_loop(), name="cron-loop"))

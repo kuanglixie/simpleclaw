@@ -17,9 +17,19 @@ from typing import Optional
 HEARTBEAT_TOKEN = "HEARTBEAT_OK"
 
 DEFAULT_PROMPT = (
-    "Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. "
-    "Do not infer or repeat old tasks from prior chats. "
-    "If nothing needs attention, reply HEARTBEAT_OK."
+    "PROACTIVE STATUS CHECK. Use cursor_agent() to do a thorough investigation. "
+    "Pass cursor_agent a prompt that asks it to:\n"
+    "1. Check Ray job status (both standalone and workspace) — any new completions, "
+    "failures, or anomalies since last check\n"
+    "2. Check TODO.md for items that are due, blocked, or need decisions\n"
+    "3. Check for recent git activity in key repos (ray-jobs, dw-airflow)\n"
+    "4. Look at experiment-job-tracker.md for experiments needing attention\n"
+    "5. Identify anything that needs the user's DECISION or ACTION\n\n"
+    "IMPORTANT: Use cursor_agent(workspace='/Users/jing.lu/git_repos/worklog') "
+    "for the investigation. It can search across repos, check jobs, read files.\n\n"
+    "If cursor_agent finds noteworthy updates, surface them. "
+    "If genuinely nothing changed or needs attention, reply HEARTBEAT_OK.\n"
+    "Do NOT repeat stale information from previous heartbeats."
 )
 
 

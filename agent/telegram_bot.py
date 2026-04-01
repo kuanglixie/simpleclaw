@@ -22,6 +22,31 @@ from .models import Task, TaskStatus, new_task_id
 from .queue import TaskQueue
 
 _TELEGRAM_MSG_LIMIT = 4096
+_QUOTE_MAX_CHARS = 2000
+
+
+def _extract_quoted_context(update: Update) -> str:
+    """Extract text from a quoted/replied-to Telegram message."""
+    msg = update.message
+    if msg is None:
+        return ""
+
+    # Telegram "quote" field: the user highlighted a specific portion
+    if hasattr(msg, "quote") and msg.quote and hasattr(msg.quote, "text") and msg.quote.text:
+        return msg.quote.text[:_QUOTE_MAX_CHARS]
+
+    # Standard reply-to: the full message being replied to
+    reply = msg.reply_to_message
+    if reply is None:
+        return ""
+
+    text = (reply.text or reply.caption or "").strip()
+    if not text:
+        return ""
+
+    if len(text) > _QUOTE_MAX_CHARS:
+        text = text[:_QUOTE_MAX_CHARS] + "..."
+    return text
 
 
 def _authorized(func):
@@ -202,6 +227,10 @@ class WorklogTelegramBot:
         if not prompt:
             await update.message.reply_text("Please send a non-empty task prompt.")
             return
+
+        quoted = _extract_quoted_context(update)
+        if quoted:
+            prompt = f"[Quoted message]\n{quoted}\n[End quote]\n\n{prompt}"
 
         task = Task(
             id=new_task_id(),

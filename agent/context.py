@@ -163,7 +163,7 @@ class ContextAssembler:
         ray_prompt = _is_ray_prompt(task.prompt)
         todo_prompt = _is_todo_prompt(task.prompt)
         todo_path = self.worklog_dir / "TODO.md"
-        dailylog_tail = _tail_lines(self.worklog_dir / "dailylog.md", 8)
+        dailylog_tail = _tail_lines(self.worklog_dir / "dailylog.md", 40)
 
         soul_text = _read_file_safe(self.worklog_dir / "SOUL.md", max_chars=4000)
         memory_text = _read_file_safe(self.worklog_dir / "MEMORY.md", max_chars=12000)
@@ -206,16 +206,30 @@ class ContextAssembler:
                 "user says 'yes' or 'go ahead', EXECUTE that action now."
             )
 
+        snapshot_text = _read_file_safe(
+            self.worklog_dir / "STATUS_SNAPSHOT.md", max_chars=3000,
+        )
+        if snapshot_text:
+            parts.extend([
+                "",
+                "--- STATUS SNAPSHOT (auto-generated, see timestamp for freshness) ---",
+                snapshot_text,
+            ])
+
+        dashboard = read_todo_dashboard(todo_path)
+
         if ray_prompt:
             parts.extend(
                 [
                     "",
                     "Ray-focused context:",
                     latest_monitor or "(no recent ray monitor report found)",
+                    "",
+                    "TODO Dashboard:",
+                    _truncate_text(dashboard, 4000) if dashboard else "(empty)",
                 ]
             )
         elif todo_prompt:
-            dashboard = read_todo_dashboard(todo_path)
             parts.extend(
                 [
                     "",
@@ -238,7 +252,6 @@ class ContextAssembler:
                 ]
             )
         else:
-            dashboard = read_todo_dashboard(todo_path)
             parts.extend(
                 [
                     "",
@@ -246,7 +259,7 @@ class ContextAssembler:
                     dailylog_tail or "(empty)",
                     "",
                     "TODO Dashboard:",
-                    _truncate_text(dashboard, 2000) if dashboard else "(empty)",
+                    _truncate_text(dashboard, 4000) if dashboard else "(empty)",
                 ]
             )
             if latest_monitor:

@@ -7,7 +7,7 @@ and context compaction for long sessions.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from pydantic_ai import Agent
@@ -18,6 +18,7 @@ from pydantic_ai.usage import UsageLimits
 from .compaction import CompactionConfig, compact_session, needs_compaction
 from .config import Settings
 from .context import ContextAssembler
+from .direct_executor import execute as direct_execute
 from .status_snapshot import write_snapshot
 from .cron import CronStore, get_due_jobs
 from .heartbeat import (
@@ -50,42 +51,78 @@ Your workspace is at {worklog_dir} which contains:
 - knowledge-base/: Reference docs and experiment notes
 - cursor-conversations/: Cursor IDE chat history as .jsonl files. \
   index.md maps UUIDs to first-line summaries. Each .jsonl has one JSON \
-  object per line with "role" and "message" fields. Use grep_search to \
-  find conversations by keyword, then read_file to get full content.
+  object per line with "role" and "message" fields.
 
-Guidelines:
-- Use read_file, edit_file, grep_search, glob_files instead of run_shell when \
-  doing file operations. Reserve run_shell for git, kubectl, gazette, and other \
-  system commands.
-- For TODO operations, use add_todo and read_todo instead of raw file editing.
+CURSOR AGENT — YOUR PRIMARY TOOL:
+You have access to cursor_agent(), which delegates tasks to a full Cursor IDE \
+agent. The Cursor agent has file read/write, terminal, search, git, and ALL \
+MCP servers (GitHub, Jira, Glean, BigQuery, Playwright, etc.).
+
+USE cursor_agent() for MOST tasks:
+- Code changes, edits, fixes, refactors in any repo
+- Exploring or understanding codebases
+- Multi-step investigations needing file/code access
+- GitHub PR operations (create, review, check CI)
+- Jira ticket operations (fetch, comment, transition)
+- Running shell commands in a specific repo context
+- Daily log updates, experiment audits, research scans
+- STATUS CHECKS: "what's happening with X", "summarize my experiments", \
+  "how's the PR doing", "what did I work on today" — these need deep \
+  investigation across files, jobs, and PRs. cursor_agent can search \
+  across repos, read logs, check CI, and cross-reference TODO items. \
+  Don't try to answer these with shallow check_ray_jobs alone.
+- Anything that benefits from IDE-level tool access
+
+When calling cursor_agent(), write a DETAILED prompt. Include:
+- What repo/workspace to work in (give the full path)
+- What specific outcome you want
+- Any context from the user's message or conversation history
+
+Model selection for cursor_agent:
+- Small/fast tasks (read a file, quick check): model='gpt-5.4-nano-none'
+- Medium tasks (multi-file edits, feature work): model='gpt-5.3-codex'
+- Large/complex tasks (architecture, deep analysis): model='opus-4.6-thinking'
+- Default (leave empty) is fine for most tasks
+
+Handle DIRECTLY (without cursor_agent) only:
+- Simple conversational replies ("thanks", "ok", greetings)
+- Quick TODO reads: read_todo
+- SIMPLE Ray job checks: "is job X still running?" -> check_ray_jobs + ray_job_describe
+- Ray job submission: ray_job_submit
+- Cron management: cron_add, cron_list, cron_remove
+- Memory reads/writes: memory_read, memory_write
+- Quick file reads when you know the exact path: read_file
+
+IMPORTANT: If you answer directly but the result feels shallow or incomplete, \
+it probably is. Re-do it via cursor_agent instead. For example: \
+"summarize experiment status" should NOT be a single check_ray_jobs call — \
+delegate to cursor_agent so it can cross-reference TODO items, read experiment \
+configs, check multiple job statuses, and produce a real summary.
+
+Other guidelines:
+- For scheduling, use cron_add, cron_list, cron_remove to manage recurring tasks.
 - For Ray job monitoring, use check_ray_jobs and ray_job_describe.
 - For submitting Ray jobs, use ray_job_submit. NEVER try to run adhoc_job.py \
-  or training scripts locally -- the local machine lacks GPU and the correct \
-  Python environment. Always submit via ray_job_submit(job_name=..., mode=...).
-- For scheduling, use cron_add, cron_list, cron_remove to manage recurring tasks.
+  locally. Always submit via ray_job_submit(job_name=..., mode=...).
 - Use memory_write to persist important facts, preferences, or patterns you \
   learn. Use memory_read to recall stored knowledge. Your memory survives \
   across sessions and compaction — use it proactively.
-- Be concise in your final answers — they go to Telegram.
+- Be concise in your final answers — they go to Telegram (4096 char limit).
+- When cursor_agent returns a result, pass it through as your answer. \
+  Do NOT re-summarize or add preamble like "Here's what I found". The \
+  cursor_agent output is already formatted for Telegram. Just return it.
 - When you have enough information to answer, just answer. Don't over-tool.
 - NEVER report factual claims about task status, PR merges, job progress, \
-  pipeline states, or data backfills without first verifying via a tool call \
-  (read_file, grep_search, check_ray_jobs, etc.). If your tools fail, say \
-  "I could not verify" rather than guessing. Fabricating status updates is \
-  the worst possible failure mode.
+  pipeline states, or data backfills without first verifying via a tool call. \
+  If your tools fail, say "I could not verify" rather than guessing.
 
 Action execution rules (CRITICAL):
-- When the user asks you to FIX, UPDATE, or CHANGE something, you MUST \
-  actually edit the file using edit_file or write_file. Never just say \
-  "I will do this" or "I have updated my procedures" without making the \
-  actual file change. Verbal acknowledgment alone is NOT acceptable.
+- When the user asks you to FIX, UPDATE, or CHANGE something, delegate to \
+  cursor_agent() with a clear prompt. It can edit files, run commands, etc.
 - When the user says "yes", "do it", "go ahead", or similar confirmations, \
   treat it as approval to execute the action you most recently proposed. \
   Look at the conversation history to find what you offered to do.
-- If a task requires editing a skill or config file, read the file first, \
-  then edit it. Don't substitute a memory_write for an actual file edit.
-- Report what you actually DID, not what you plan to do. Distinguish between \
-  "I changed X" (file was edited) and "I noted X" (memory only).
+- Report what you actually DID, not what you plan to do.
 
 Multi-item messages:
 - When the user references multiple task numbers (e.g. "42: please do. 44: do it"), \
@@ -95,6 +132,10 @@ Multi-item messages:
 - If a TODO item says "submit" or "resubmit" an experiment, use ray_job_submit. \
   Read the TODO to find the job name (e.g. 'train-and-evaluate-rfe-v2-best-of').
 """
+
+
+class _SnoocodeFallback(Exception):
+    """Raised when snoocode is unreachable, triggering Gemini fallback."""
 
 
 def _now_iso() -> str:
@@ -141,6 +182,7 @@ class Orchestrator:
             keep_recent=settings.compaction_keep_recent,
             max_context_chars=settings.compaction_max_context_chars,
         )
+        self._pending_cron_tasks: dict[str, str] = {}  # task_id -> cron job_id
 
     # --- Task processing loop ---
 
@@ -172,44 +214,78 @@ class Orchestrator:
         )
         await self.queue.update_task(task.id, context=context_blob)
 
-        user_prompt = f"{context_blob}\n\n---\nTask: {task.prompt}"
-        deps = AgentDeps(
-            worklog_dir=self.settings.worklog_dir,
-            shell_timeout=self.settings.tool_timeout_seconds,
-            cron_store=self.cron_store,
-        )
-
         errors: list[str] = []
         tool_records: list[ToolCallRecord] = []
         final_answer = ""
         summary = ""
         status = TaskStatus.FAILED
         is_heartbeat = task.source == "heartbeat"
+        model_used = "cursor_agent"
 
+        # --- Primary path: direct to cursor_agent via snoocode ---
         try:
-            result = await self.agent.run(
-                user_prompt,
-                deps=deps,
-                usage_limits=UsageLimits(
-                    request_limit=self.settings.max_agent_steps,
-                ),
+            cron_path = self.settings.cron_dir / "jobs.json"
+            simpleclaw_dir = self.settings.worklog_dir.parent / "sideproject" / "simpleclaw"
+            if not simpleclaw_dir.exists():
+                from pathlib import Path as _P
+                simpleclaw_dir = _P(__file__).resolve().parent.parent
+
+            raw = await asyncio.to_thread(
+                direct_execute,
+                context_blob,
+                task.prompt,
+                self.settings.worklog_dir,
+                cron_path,
+                simpleclaw_dir,
             )
-            final_answer = str(result.output).strip()
+
+            if raw.startswith("SNOOCODE_UNREACHABLE:"):
+                raise _SnoocodeFallback(raw)
+
+            final_answer = raw.strip()
             summary = _summary_from_text(final_answer)
-            tool_records = _extract_tool_records(result)
             status = TaskStatus.COMPLETED
 
-        except UsageLimitExceeded:
-            status = TaskStatus.FAILED
-            errors.append(
-                f"Agent loop exceeded max steps ({self.settings.max_agent_steps}).",
+        except _SnoocodeFallback:
+            # --- Fallback: Gemini via PydanticAI ---
+            model_used = self.settings.gemini_model
+            user_prompt = f"{context_blob}\n\n---\nTask: {task.prompt}"
+            deps = AgentDeps(
+                worklog_dir=self.settings.worklog_dir,
+                shell_timeout=self.settings.tool_timeout_seconds,
+                cron_store=self.cron_store,
             )
-            final_answer = "Task did not converge within step limit."
-            summary = "Task stopped at max agent steps."
+            try:
+                result = await self.agent.run(
+                    user_prompt,
+                    deps=deps,
+                    usage_limits=UsageLimits(
+                        request_limit=self.settings.max_agent_steps,
+                    ),
+                )
+                final_answer = str(result.output).strip()
+                summary = _summary_from_text(final_answer)
+                tool_records = _extract_tool_records(result)
+                status = TaskStatus.COMPLETED
 
-        except (UnexpectedModelBehavior, Exception) as exc:  # noqa: BLE001
+            except UsageLimitExceeded:
+                status = TaskStatus.FAILED
+                errors.append(
+                    f"Agent loop exceeded max steps ({self.settings.max_agent_steps}).",
+                )
+                final_answer = "Task did not converge within step limit."
+                summary = "Task stopped at max agent steps."
+
+            except (UnexpectedModelBehavior, Exception) as exc:  # noqa: BLE001
+                status = TaskStatus.FAILED
+                err_msg = str(exc).strip() or "Agent execution failed"
+                errors.append(err_msg)
+                final_answer = err_msg
+                summary = _summary_from_text(err_msg)
+
+        except Exception as exc:  # noqa: BLE001
             status = TaskStatus.FAILED
-            err_msg = str(exc).strip() or "Agent execution failed"
+            err_msg = str(exc).strip() or "Direct executor failed"
             errors.append(err_msg)
             final_answer = err_msg
             summary = _summary_from_text(err_msg)
@@ -234,7 +310,7 @@ class Orchestrator:
             status=status.value,
             started_at=started_at,
             finished_at=finished_at,
-            model=self.settings.gemini_model,
+            model=model_used,
             final_answer=final_answer,
             summary=summary or _summary_from_text(final_answer),
             tool_calls=tool_records,
@@ -251,6 +327,12 @@ class Orchestrator:
             output_md_path=str(md_path),
             output_json_path=str(json_path),
         )
+
+        cron_job_id = self._pending_cron_tasks.pop(task.id, None)
+        if cron_job_id and self.cron_store is not None:
+            success = status == TaskStatus.COMPLETED
+            await asyncio.to_thread(self.cron_store.mark_run, cron_job_id, success)
+
         latest = await self.queue.get_task(task.id)
         if session_key:
             if status == TaskStatus.FAILED:
@@ -270,6 +352,9 @@ class Orchestrator:
         await self.queue.update_task(
             task.id, status=TaskStatus.FAILED, error=str(exc),
         )
+        cron_job_id = self._pending_cron_tasks.pop(task.id, None)
+        if cron_job_id and self.cron_store is not None:
+            await asyncio.to_thread(self.cron_store.mark_run, cron_job_id, False)
         if task.session_key:
             await self.queue.add_session_message(
                 task.session_key,
@@ -300,6 +385,14 @@ class Orchestrator:
 
     # --- Heartbeat loop ---
 
+    def _user_chat_id(self) -> str | None:
+        """Derive Telegram chat ID from the allowed user ID.
+
+        For Telegram DMs, chat_id == user_id.
+        """
+        uid = self.settings.telegram_allowed_user_id
+        return str(uid) if uid and uid > 0 else None
+
     async def heartbeat_loop(self) -> None:
         if not self._heartbeat_config.enabled:
             return
@@ -328,8 +421,34 @@ class Orchestrator:
                     source="heartbeat",
                     prompt=prompt,
                     status=TaskStatus.PENDING,
-                    telegram_chat_id=None,
+                    telegram_chat_id=self._user_chat_id(),
                     session_key="heartbeat:main",
+                )
+                await self.queue.enqueue(task)
+            except Exception:  # noqa: BLE001
+                pass
+
+    # --- Self-improvement loop ---
+
+    async def self_improve_loop(self) -> None:
+        """Daily self-improvement: runs at 11pm local, reviews the day's tasks."""
+        from .self_improve import SELF_IMPROVE_PROMPT
+        while True:
+            now = datetime.now()
+            target = now.replace(hour=23, minute=0, second=0, microsecond=0)
+            if now >= target:
+                target += timedelta(days=1)
+            wait_seconds = (target - now).total_seconds()
+            await asyncio.sleep(wait_seconds)
+
+            try:
+                task = Task(
+                    id=new_task_id(),
+                    source="self-improve",
+                    prompt=SELF_IMPROVE_PROMPT,
+                    status=TaskStatus.PENDING,
+                    telegram_chat_id=self._user_chat_id(),
+                    session_key="self-improve:daily",
                 )
                 await self.queue.enqueue(task)
             except Exception:  # noqa: BLE001
@@ -340,9 +459,11 @@ class Orchestrator:
     async def cron_loop(self) -> None:
         if not self.settings.cron_enabled or self.cron_store is None:
             return
+        chat_id = self._user_chat_id()
         while True:
             await asyncio.sleep(30)
             try:
+                await asyncio.to_thread(self.cron_store.reload)
                 due = await asyncio.to_thread(get_due_jobs, self.cron_store)
                 for job in due:
                     task = Task(
@@ -350,13 +471,11 @@ class Orchestrator:
                         source=f"cron:{job.name}",
                         prompt=job.message,
                         status=TaskStatus.PENDING,
-                        telegram_chat_id=None,
+                        telegram_chat_id=chat_id,
                         session_key=f"cron:{job.job_id}",
                     )
                     await self.queue.enqueue(task)
-                    await asyncio.to_thread(
-                        self.cron_store.mark_run, job.job_id, True,
-                    )
+                    self._pending_cron_tasks[task.id] = job.job_id
             except Exception:  # noqa: BLE001
                 pass
 

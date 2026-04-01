@@ -17,7 +17,84 @@ from pydantic_ai import Agent, RunContext
 from pydantic_ai.settings import ModelSettings
 
 from .cron import CronJob, CronSchedule, CronStore, format_job_list
-from .tools import file_ops, memory_ops, ray_ops, search, shell, todo, web
+from .self_improve import (
+    build_daily_digest,
+    format_digest_telegram,
+    append_evolution_log,
+    extract_memory_updates,
+)
+from .tools import file_ops, memory_ops, ray_ops, search, shell, snoocode, todo, web
+
+_CURSOR_CONTEXT_MAX = 6000
+
+
+def _read_safe(path: Path, max_chars: int = 0) -> str:
+    if not path.exists():
+        return ""
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return ""
+    if max_chars and len(text) > max_chars:
+        return text[:max_chars] + "\n...(truncated)"
+    return text
+
+
+_OUTPUT_INSTRUCTIONS = """\
+## Output Format (CRITICAL)
+Your response goes DIRECTLY to a Telegram chat. Format accordingly:
+- Lead with the KEY FINDING or ANSWER in the first 1-2 lines
+- Use bullet points, not long paragraphs
+- Bold (**text**) for critical items, status labels, blockers
+- Keep total response under 3500 chars (Telegram limit is 4096)
+- If there are actionable items, list them clearly at the end
+- Do NOT include internal reasoning, tool call logs, or "let me check" preamble
+- Do NOT say "here is a summary" — just give the summary directly
+"""
+
+
+def _build_cursor_agent_prompt(task_prompt: str, worklog_dir: Path) -> str:
+    """Prepend essential context so the Cursor agent isn't flying blind."""
+    parts: list[str] = []
+
+    memory = _read_safe(worklog_dir / "MEMORY.md", max_chars=3000)
+    if memory:
+        parts.append(f"## Agent Memory (from {worklog_dir}/MEMORY.md)\n{memory}")
+
+    todo_path = worklog_dir / "TODO.md"
+    if todo_path.exists():
+        lines = todo_path.read_text(errors="replace").splitlines()
+        dashboard_end = len(lines)
+        for i, line in enumerate(lines):
+            if line.strip().startswith("## Details"):
+                dashboard_end = i
+                break
+        dashboard = "\n".join(lines[:dashboard_end]).strip()
+        if dashboard:
+            parts.append(f"## TODO Dashboard\n{dashboard[:2000]}")
+
+    snapshot = _read_safe(worklog_dir / "STATUS_SNAPSHOT.md", max_chars=1500)
+    if snapshot:
+        parts.append(f"## Status Snapshot\n{snapshot}")
+
+    if not parts:
+        context_block = ""
+    else:
+        context_block = "\n\n".join(parts)
+        if len(context_block) > _CURSOR_CONTEXT_MAX:
+            context_block = context_block[:_CURSOR_CONTEXT_MAX] + "\n...(truncated)"
+
+    sections = []
+    if context_block:
+        sections.append(
+            f"--- Context (auto-injected by SimpleClaw) ---\n"
+            f"{context_block}\n"
+            f"--- End Context ---"
+        )
+    sections.append(_OUTPUT_INSTRUCTIONS)
+    sections.append(f"## Task\n{task_prompt}")
+
+    return "\n\n".join(sections)
 
 
 @dataclass
@@ -352,6 +429,207 @@ def create_agent(
             content=content,
             mode=mode,
         )
+
+    # ------------------------------------------------------------------
+    # Snoocode (dev workflow tools via local MCP server)
+    # ------------------------------------------------------------------
+
+    @agent.tool_plain
+    def snoocode_list_prs(owner: str, repo: str, state: str = "open") -> str:
+        """List pull requests for a GitHub repository.
+
+        Args:
+            owner: Repository owner/org (e.g. 'reddit').
+            repo: Repository name.
+            state: PR state: 'open', 'closed', or 'all'. Default 'open'.
+        """
+        return snoocode.list_prs(owner, repo, state=state)
+
+    @agent.tool_plain
+    def snoocode_get_pr(owner: str, repo: str, pull_number: int) -> str:
+        """Get details of a specific pull request.
+
+        Args:
+            owner: Repository owner/org.
+            repo: Repository name.
+            pull_number: The PR number.
+        """
+        return snoocode.get_pr(owner, repo, pull_number)
+
+    @agent.tool_plain
+    def snoocode_create_draft_pr(
+        owner: str, repo: str, title: str, body: str,
+        head: str, base: str = "master",
+    ) -> str:
+        """Create a draft pull request.
+
+        Args:
+            owner: Repository owner/org.
+            repo: Repository name.
+            title: PR title.
+            body: PR description (markdown).
+            head: Source branch name.
+            base: Target branch (default 'master').
+        """
+        return snoocode.create_draft_pr(owner, repo, title, body, head, base)
+
+    @agent.tool_plain
+    def snoocode_ci_watcher(
+        owner: str, repo: str, pull_number: int,
+        poll_interval: int = 30, timeout: int = 1800,
+    ) -> str:
+        """Watch a PR's CI/CD builds until they pass or fail. Automatically
+        investigates Drone CI failures and extracts error logs.
+
+        Args:
+            owner: Repository owner/org.
+            repo: Repository name.
+            pull_number: The PR number to watch.
+            poll_interval: Seconds between status checks (default 30).
+            timeout: Max seconds to watch (default 1800).
+        """
+        return snoocode.ci_watcher(owner, repo, pull_number, poll_interval, timeout)
+
+    @agent.tool_plain
+    def snoocode_get_build_status(owner: str, repo: str, ref: str) -> str:
+        """Get Drone CI build status for a git ref (branch or SHA).
+
+        Args:
+            owner: Repository owner/org.
+            repo: Repository name.
+            ref: Git ref (branch name or commit SHA).
+        """
+        return snoocode.get_build_status(owner, repo, ref)
+
+    @agent.tool_plain
+    def snoocode_get_build_logs(
+        owner: str, repo: str, build_number: int, stage: int, step: int,
+    ) -> str:
+        """Get logs for a specific Drone CI build stage/step.
+
+        Args:
+            owner: Repository owner/org.
+            repo: Repository name.
+            build_number: The Drone build number.
+            stage: Stage number (1-indexed).
+            step: Step number (1-indexed).
+        """
+        return snoocode.get_build_logs(owner, repo, build_number, stage, step)
+
+    @agent.tool_plain
+    def snoocode_get_ticket(ticket_key: str) -> str:
+        """Get details of a Jira ticket.
+
+        Args:
+            ticket_key: The ticket key (e.g. 'DISCO-1234').
+        """
+        return snoocode.get_ticket(ticket_key)
+
+    @agent.tool_plain
+    def snoocode_search_tickets(query: str) -> str:
+        """Search Jira tickets by JQL or keyword.
+
+        Args:
+            query: JQL query or keyword search string.
+        """
+        return snoocode.search_tickets(query)
+
+    @agent.tool_plain
+    def snoocode_add_ticket_comment(ticket_key: str, body: str) -> str:
+        """Add a comment to a Jira ticket.
+
+        Args:
+            ticket_key: The ticket key (e.g. 'DISCO-1234').
+            body: Comment text (markdown supported).
+        """
+        return snoocode.add_comment(ticket_key, body)
+
+    @agent.tool
+    def cursor_agent(
+        ctx: RunContext[AgentDeps],
+        prompt: str,
+        workspace: str = "/Users/jing.lu/git_repos",
+        model: str = "",
+    ) -> str:
+        """Delegate a task to the Cursor IDE agent. This is the most powerful
+        tool available — the Cursor agent has full IDE access including file
+        read/write, terminal, search, git, and ALL MCP servers (GitHub, Jira,
+        Glean, BigQuery, etc.).
+
+        USE THIS for:
+        - Any code changes, edits, refactors, or fixes
+        - Exploring or understanding codebases
+        - Multi-step investigations that need file/code access
+        - Running shell commands in a repo context
+        - GitHub PR operations, CI debugging, Jira updates
+        - Any task that benefits from IDE-level tool access
+
+        Keep handling DIRECTLY (without cursor_agent) only:
+        - Simple conversational responses
+        - Quick TODO/memory reads that use existing tools
+        - Ray job status checks via check_ray_jobs
+
+        Args:
+            prompt: Detailed task description for the Cursor agent. Be specific
+                about what files, repos, or actions are needed.
+            workspace: Working directory for the agent. Default is ~/git_repos.
+                Use the specific repo path when possible (e.g.
+                '/Users/jing.lu/git_repos/ray-jobs').
+            model: Model to use. Leave empty for default. Options:
+                'gpt-5.4-nano-none' (small/fast), 'gpt-5.3-codex' (medium),
+                'opus-4.6-thinking' (large/complex).
+        """
+        full_prompt = _build_cursor_agent_prompt(prompt, ctx.deps.worklog_dir)
+        return snoocode.run_agent(full_prompt, workspace=workspace, model=model)
+
+    @agent.tool
+    def self_review_today(ctx: RunContext[AgentDeps], date: str = "") -> str:
+        """Run a self-improvement review for today (or a specific date).
+
+        Analyzes completed/failed tasks, extracts failure patterns and tool usage,
+        generates improvement ideas, and logs to EVOLUTION_LOG.md.
+        Also updates MEMORY.md with new learned patterns.
+
+        Call this during the daily self-improvement cron job, or manually to
+        review a specific day's performance.
+
+        Args:
+            date: Date to review in YYYY-MM-DD format. Empty = today.
+        """
+        from datetime import datetime as _dt, timezone as _tz
+        if not date:
+            date = _dt.now(tz=_tz.utc).strftime("%Y-%m-%d")
+
+        outbox = ctx.deps.worklog_dir / ".agent_mailbox" / "outbox"
+        digest = build_daily_digest(outbox, date)
+
+        append_evolution_log(ctx.deps.worklog_dir, digest)
+
+        memory_entries = extract_memory_updates(digest)
+        if memory_entries:
+            combined = "\n".join(f"- {e}" for e in memory_entries)
+            memory_ops.memory_write(
+                str(ctx.deps.worklog_dir), "Learned Patterns", combined,
+            )
+
+        return format_digest_telegram(digest)
+
+    @agent.tool_plain
+    def snoocode_call(tool_name: str, arguments: str = "{}") -> str:
+        """Generic fallback: call any snoocode tool by name. Use the specific
+        snoocode_* tools or cursor_agent when possible. This is for less common
+        operations like workflow_save, restart_build, update_pr, etc.
+
+        Args:
+            tool_name: The snoocode tool name (e.g. 'workflow_list', 'restart_build').
+            arguments: JSON string of tool arguments.
+        """
+        import json as _json
+        try:
+            args = _json.loads(arguments) if arguments else {}
+        except _json.JSONDecodeError:
+            return f"Error: invalid JSON arguments: {arguments}"
+        return snoocode.call_tool(tool_name, args)
 
     # ------------------------------------------------------------------
     # Browser (optional — Chrome extension relay)
