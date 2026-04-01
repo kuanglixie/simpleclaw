@@ -79,7 +79,7 @@ When calling cursor_agent(), write a DETAILED prompt. Include:
 - Any context from the user's message or conversation history
 
 Model selection for cursor_agent:
-- Always uses claude-4.6-opus by default
+- Always uses opus-4.6-thinking by default
 - Override only if explicitly requested by the user
 
 Handle DIRECTLY (without cursor_agent) only:

@@ -164,7 +164,7 @@ def execute(
     cron_path: Path,
     simpleclaw_dir: Path,
     workspace: str = "",
-    model: str = "claude-4.6-opus",
+    model: str = "opus-4.6-thinking",
 ) -> str:
     """Send a task directly to cursor_agent via snoocode.
 

@@ -549,7 +549,7 @@ def create_agent(
         ctx: RunContext[AgentDeps],
         prompt: str,
         workspace: str = "/Users/jing.lu/git_repos",
-        model: str = "claude-4.6-opus",
+        model: str = "opus-4.6-thinking",
     ) -> str:
         """Delegate a task to the Cursor IDE agent. This is the most powerful
         tool available — the Cursor agent has full IDE access including file
@@ -575,7 +575,7 @@ def create_agent(
             workspace: Working directory for the agent. Default is ~/git_repos.
                 Use the specific repo path when possible (e.g.
                 '/Users/jing.lu/git_repos/ray-jobs').
-            model: Model to use. Default is claude-4.6-opus.
+            model: Model to use. Default is opus-4.6-thinking.
         """
         full_prompt = _build_cursor_agent_prompt(prompt, ctx.deps.worklog_dir)
         return snoocode.run_agent(full_prompt, workspace=workspace, model=model)
