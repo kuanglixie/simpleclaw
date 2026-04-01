@@ -79,10 +79,8 @@ When calling cursor_agent(), write a DETAILED prompt. Include:
 - Any context from the user's message or conversation history
 
 Model selection for cursor_agent:
-- Small/fast tasks (read a file, quick check): model='gpt-5.4-nano-none'
-- Medium tasks (multi-file edits, feature work): model='gpt-5.3-codex'
-- Large/complex tasks (architecture, deep analysis): model='opus-4.6-thinking'
-- Default (leave empty) is fine for most tasks
+- Always uses claude-4.6-opus by default
+- Override only if explicitly requested by the user
 
 Handle DIRECTLY (without cursor_agent) only:
 - Simple conversational replies ("thanks", "ok", greetings)
