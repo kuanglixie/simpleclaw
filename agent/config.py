@@ -5,6 +5,22 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+def bootstrap_config_env() -> None:
+    """Apply `config.env` into ``os.environ`` via setdefault before other imports.
+
+    Modules such as ``agent.tools.snoocode`` read env vars at import time; without
+    this, values present only in the file are invisible to ``os.getenv``.
+    """
+    config_path = Path(
+        os.getenv(
+            "WORKLOG_AGENT_CONFIG",
+            str(Path.home() / ".config/worklog-agent/config.env"),
+        )
+    )
+    for key, value in _read_env_file(config_path).items():
+        os.environ.setdefault(key, value)
+
+
 def _read_env_file(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     if not path.exists():

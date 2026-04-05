@@ -10,6 +10,7 @@ Uses MCP Streamable HTTP transport: session init + SSE responses.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import threading
@@ -17,6 +18,23 @@ from typing import Any
 
 SNOOCODE_URL = "http://127.0.0.1:3846/mcp"
 _TIMEOUT = 120
+
+
+def _http_timeout_seconds(env_name: str, default: int, min_s: int, max_s: int) -> int:
+    """Parse env for HTTP max-time; clamp to [min_s, max_s]."""
+    try:
+        v = int(os.getenv(env_name, str(default)))
+    except ValueError:
+        v = default
+    return max(min_s, min(max_s, v))
+
+
+# run_agent can run many tool steps (heartbeat: kubectl, gazette, PRs). The default
+# 120s curl limit caused false "cursor_agent timed out" when the IDE agent was still working.
+# Default 3600s (1h); override with SNOOCODE_RUN_AGENT_TIMEOUT (clamped 120–7200).
+RUN_AGENT_HTTP_TIMEOUT = _http_timeout_seconds(
+    "SNOOCODE_RUN_AGENT_TIMEOUT", default=3600, min_s=120, max_s=7200,
+)
 _ACCEPT = "application/json, text/event-stream"
 
 _lock = threading.Lock()
@@ -137,8 +155,20 @@ def _reset_session() -> None:
         _session_id = None
 
 
-def call_tool(tool_name: str, arguments: dict[str, Any] | None = None) -> str:
-    """Call any snoocode MCP tool via HTTP JSON-RPC with session management."""
+def call_tool(
+    tool_name: str,
+    arguments: dict[str, Any] | None = None,
+    *,
+    timeout: int | None = None,
+) -> str:
+    """Call any snoocode MCP tool via HTTP JSON-RPC with session management.
+
+    Args:
+        tool_name: MCP tool name.
+        arguments: Tool arguments.
+        timeout: Seconds for curl --max-time (default 120). Use
+            RUN_AGENT_HTTP_TIMEOUT for long-running tools like run_agent.
+    """
     sid = _ensure_session()
     if not sid:
         return f"Error: failed to establish MCP session with snoocode"
@@ -153,7 +183,8 @@ def call_tool(tool_name: str, arguments: dict[str, Any] | None = None) -> str:
         },
     }
 
-    body, _ = _curl_post(payload, session_id=sid)
+    t = timeout if timeout is not None else _TIMEOUT
+    body, _ = _curl_post(payload, session_id=sid, timeout=t)
     if not body:
         _reset_session()
         return f"Error: empty response from snoocode for {tool_name}"
@@ -171,6 +202,7 @@ def call_tool(tool_name: str, arguments: dict[str, Any] | None = None) -> str:
         return f"Error: {msg}"
 
     result = resp.get("result", {})
+    is_error = result.get("isError", False) if isinstance(result, dict) else False
     content_parts = result.get("content", []) if isinstance(result, dict) else []
     if content_parts:
         texts = []
@@ -180,7 +212,10 @@ def call_tool(tool_name: str, arguments: dict[str, Any] | None = None) -> str:
             elif isinstance(part, str):
                 texts.append(part)
         if texts:
-            return "\n".join(texts)
+            combined = "\n".join(texts)
+            if is_error:
+                return f"Error: {combined}"
+            return combined
 
     if isinstance(result, str):
         return result
@@ -283,4 +318,20 @@ def run_agent(prompt: str, workspace: str = "", model: str = "") -> str:
         args["workspace"] = workspace
     if model:
         args["model"] = model
-    return call_tool("run_agent", args)
+    raw = call_tool("run_agent", args, timeout=RUN_AGENT_HTTP_TIMEOUT)
+
+    if raw.startswith("Error:"):
+        return raw
+
+    try:
+        envelope = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return raw
+
+    if isinstance(envelope, dict) and "result" in envelope:
+        result_text = envelope["result"]
+        if envelope.get("status") != "success":
+            return f"Cursor agent exited with code 1: {result_text}"
+        return str(result_text).strip() if result_text else ""
+
+    return raw

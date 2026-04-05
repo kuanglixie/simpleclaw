@@ -197,14 +197,16 @@ class TestConvenienceWrappers:
     @mock.patch("agent.tools.snoocode.call_tool", return_value="ok")
     def test_run_agent_minimal(self, mock_call):
         snoocode.run_agent("do something")
-        mock_call.assert_called_once_with("run_agent", {"prompt": "do something"})
+        mock_call.assert_called_once_with(
+            "run_agent", {"prompt": "do something"}, timeout=snoocode.RUN_AGENT_HTTP_TIMEOUT,
+        )
 
     @mock.patch("agent.tools.snoocode.call_tool", return_value="ok")
     def test_run_agent_full(self, mock_call):
         snoocode.run_agent("fix it", workspace="/tmp/repo", model="fast")
         mock_call.assert_called_once_with("run_agent", {
             "prompt": "fix it", "workspace": "/tmp/repo", "model": "fast",
-        })
+        }, timeout=snoocode.RUN_AGENT_HTTP_TIMEOUT)
 
     @mock.patch("agent.tools.snoocode.call_tool", return_value="ok")
     def test_get_ticket(self, mock_call):

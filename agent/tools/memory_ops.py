@@ -3,6 +3,9 @@
 MEMORY.md is a structured Markdown file with sections like Preferences,
 Key Facts, Learned Patterns, Projects, and People. The agent uses these
 tools to persist important knowledge across sessions and compaction cycles.
+
+Includes deduplication: new facts are checked against existing content
+to prevent the accumulation of redundant entries.
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ VALID_SECTIONS = frozenset({
 })
 
 TOKEN_WARNING_CHARS = 12_000  # ~3000 tokens
+HARD_LIMIT_CHARS = 16_000
 
 
 def _memory_path(worklog_dir: str) -> Path:
@@ -79,6 +83,70 @@ def _extract_header(text: str) -> str:
     return "\n".join(lines)
 
 
+def _normalize_for_comparison(text: str) -> str:
+    """Normalize text for dedup comparison: lowercase, strip formatting."""
+    text = text.lower().strip()
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    text = re.sub(r"`(.+?)`", r"\1", text)
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"^[-*]\s*", "", text)
+    return text
+
+
+def _extract_bullets(content: str) -> list[str]:
+    """Extract individual bullet points from content."""
+    bullets = []
+    for line in content.strip().splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- ") or stripped.startswith("* "):
+            bullets.append(stripped[2:].strip())
+        elif stripped and not stripped.startswith("#"):
+            bullets.append(stripped)
+    return bullets
+
+
+def _is_duplicate(new_bullet: str, existing_text: str, threshold: float = 0.65) -> bool:
+    """Check if a bullet point is substantially duplicated in existing text.
+
+    Uses token overlap (Jaccard similarity on words) as a lightweight
+    dedup check. No external dependencies needed.
+    """
+    new_norm = _normalize_for_comparison(new_bullet)
+    new_tokens = set(new_norm.split())
+
+    if len(new_tokens) < 3:
+        return new_norm in _normalize_for_comparison(existing_text)
+
+    for line in existing_text.splitlines():
+        existing_norm = _normalize_for_comparison(line)
+        existing_tokens = set(existing_norm.split())
+        if not existing_tokens:
+            continue
+
+        intersection = new_tokens & existing_tokens
+        union = new_tokens | existing_tokens
+        if union and len(intersection) / len(union) >= threshold:
+            return True
+
+    return False
+
+
+def _dedup_content(new_content: str, existing_body: str) -> str:
+    """Remove bullets from new_content that are duplicates of existing_body."""
+    bullets = _extract_bullets(new_content)
+    if not bullets:
+        return new_content
+
+    novel: list[str] = []
+    for bullet in bullets:
+        if not _is_duplicate(bullet, existing_body):
+            novel.append(f"- {bullet}")
+
+    if not novel:
+        return ""
+    return "\n".join(novel)
+
+
 def memory_read(worklog_dir: str, section: str = "") -> str:
     """Read MEMORY.md, optionally filtered to a specific section."""
     path = _memory_path(worklog_dir)
@@ -104,12 +172,12 @@ def memory_write(
     content: str,
     mode: str = "append",
 ) -> str:
-    """Write to a section of MEMORY.md.
+    """Write to a section of MEMORY.md with deduplication.
 
     Args:
         section: Section name (e.g., "Key Facts", "Preferences").
         content: The content to write.
-        mode: "append" adds to the section, "replace" overwrites it.
+        mode: "append" adds to the section (deduped), "replace" overwrites it.
     """
     if not section:
         return "Error: section name is required."
@@ -131,12 +199,24 @@ def memory_write(
         cleaned = existing
         if cleaned in ("- (none yet)", "(none yet)", ""):
             cleaned = ""
+
+        deduped = _dedup_content(content, cleaned) if cleaned else content.strip()
+        if not deduped.strip():
+            return f"Section '{section}' already contains this information. No changes made."
+
         if cleaned:
-            sections[section] = cleaned + "\n" + content.strip()
+            sections[section] = cleaned + "\n" + deduped.strip()
         else:
-            sections[section] = content.strip()
+            sections[section] = deduped.strip()
 
     new_text = _rebuild_file(header, sections)
+
+    if len(new_text) > HARD_LIMIT_CHARS:
+        return (
+            f"Error: MEMORY.md would exceed {HARD_LIMIT_CHARS} chars "
+            f"({len(new_text)} chars). Prune old entries first or use "
+            f"daily notes for transient information."
+        )
 
     if len(new_text) > TOKEN_WARNING_CHARS:
         warning = (

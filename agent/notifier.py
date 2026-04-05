@@ -129,7 +129,7 @@ def _build_user_facing_body(summary: str, final_answer: str) -> str:
 
 
 def _clean_text(text: str) -> str:
-    """Remove internal noise lines from model output."""
+    """Remove internal noise lines and collapse excessive whitespace."""
     lines = []
     for raw in text.splitlines():
         line = raw.strip()
@@ -139,7 +139,10 @@ def _clean_text(text: str) -> str:
         if _is_internal_note_line(line):
             continue
         lines.append(raw)
-    return "\n".join(lines).strip()
+
+    cleaned = "\n".join(lines).strip()
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned
 
 
 _INTERNAL_NOTE_MARKERS = (
@@ -152,6 +155,15 @@ _INTERNAL_NOTE_MARKERS = (
     "i'm ",
     "looping.",
     "stuck in a loop",
+    "let me ",
+    "now i'll",
+    "now i will",
+)
+
+_PREAMBLE_RE = re.compile(
+    r"^(verifying|checking|reading|fetching|looking up|composing|gathering"
+    r"|searching|augmenting|applying|inspecting|scanning|querying)\b.{10,}$",
+    re.IGNORECASE,
 )
 
 
@@ -159,7 +171,11 @@ def _is_internal_note_line(line: str) -> bool:
     lowered = line.strip().lower()
     if not lowered:
         return True
-    return any(marker in lowered for marker in _INTERNAL_NOTE_MARKERS)
+    if any(marker in lowered for marker in _INTERNAL_NOTE_MARKERS):
+        return True
+    if _PREAMBLE_RE.match(line.strip()):
+        return True
+    return False
 
 
 _ERROR_PATTERN = re.compile(

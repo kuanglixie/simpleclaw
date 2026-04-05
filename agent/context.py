@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .models import Task
+from .tools.daily_notes import load_recent_daily_notes
 
 
 def _tail_lines(path: Path, limit: int) -> str:
@@ -81,6 +82,21 @@ def _extract_task_nums(prompt: str) -> list[str]:
     nums = re.findall(r"#(\d+)", prompt)
     nums.extend(re.findall(r"(?:task|item)\s*#?\s*(\d+)", prompt, re.IGNORECASE))
     return list(dict.fromkeys(nums))
+
+
+def _extract_task_nums_from_conversation(
+    messages: list[tuple[str, str]],
+) -> list[str]:
+    """Extract task numbers from recent conversation for context enrichment.
+
+    When the user sends a follow-up like "How is the progress", we need to
+    find which task they're referring to from the conversation history.
+    """
+    all_nums: list[str] = []
+    for role, content in reversed(messages[-6:]):
+        nums = _extract_task_nums(content)
+        all_nums.extend(nums)
+    return list(dict.fromkeys(all_nums))[:3]
 
 
 def format_todo_for_telegram(path: Path) -> str:
@@ -185,10 +201,14 @@ class ContextAssembler:
             f"Session key: {task.session_key or 'n/a'}",
         ]
 
+        daily_notes_text = load_recent_daily_notes(self.worklog_dir, max_chars=4000)
+
         if soul_text:
             parts.extend(["", "--- SOUL (identity) ---", soul_text])
         if memory_text:
             parts.extend(["", "--- MEMORY (long-term knowledge) ---", memory_text])
+        if daily_notes_text:
+            parts.extend(["", "--- DAILY NOTES (today + yesterday) ---", daily_notes_text])
 
         if recent_messages:
             parts.extend(["", "Recent conversation (most recent last):"])
@@ -262,6 +282,18 @@ class ContextAssembler:
                     _truncate_text(dashboard, 4000) if dashboard else "(empty)",
                 ]
             )
+
+            conv_task_nums = _extract_task_nums_from_conversation(
+                recent_messages,
+            ) if recent_messages else []
+            for num in conv_task_nums[:2]:
+                detail = read_todo_detail(todo_path, num)
+                if detail:
+                    parts.extend([
+                        "",
+                        f"TODO Detail (#{num}, from conversation context):",
+                        _truncate_text(detail, 3000),
+                    ])
             if latest_monitor:
                 parts.extend(
                     [

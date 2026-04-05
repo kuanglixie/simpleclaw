@@ -2,8 +2,25 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
+
+
+def _reddit_environ() -> dict[str, str]:
+    """Copy of the environment with Reddit Gazette paths prepended when present."""
+    env = os.environ.copy()
+    extra_dirs = (
+        "/opt/reddit/bin",
+        str(Path.home() / ".local/bin"),
+        "/usr/local/bin",
+    )
+    existing = env.get("PATH", "")
+    parts = [p for p in existing.split(":") if p]
+    prepend = [d for d in extra_dirs if Path(d).is_dir() and d not in parts]
+    if prepend:
+        env["PATH"] = ":".join(prepend + parts)
+    return env
 
 
 def ray_job_submit(
@@ -45,6 +62,7 @@ def ray_job_submit(
                 capture_output=True, text=True,
                 timeout=120, check=False,
                 cwd=project_dir,
+                env=_reddit_environ(),
             )
         except subprocess.TimeoutExpired:
             return f"Job submission timed out after 120s."
@@ -61,6 +79,7 @@ def ray_job_submit(
             capture_output=True, text=True,
             timeout=120, check=False,
             cwd=project_dir,
+            env=_reddit_environ(),
         )
     except subprocess.TimeoutExpired:
         return f"gazette job submission timed out after 120s."
@@ -82,6 +101,7 @@ def check_ray_jobs(worklog_dir: str, mode: str = "standalone", top: int = 10) ->
             capture_output=True, text=True,
             timeout=120, check=False,
             cwd=str(worklog_dir),
+            env=_reddit_environ(),
         )
     except subprocess.TimeoutExpired:
         return "Ray job check timed out after 120s."
@@ -98,6 +118,7 @@ def _fallback_gazette_list() -> str:
             ["bash", "-lc", "gazette ray job list"],
             capture_output=True, text=True,
             timeout=60, check=False,
+            env=_reddit_environ(),
         )
         return (proc.stdout or "").strip() + ("\n" + proc.stderr.strip() if proc.stderr else "")
     except Exception as exc:
@@ -111,6 +132,7 @@ def ray_job_describe(job_id: str) -> str:
             ["bash", "-lc", cmd],
             capture_output=True, text=True,
             timeout=60, check=False,
+            env=_reddit_environ(),
         )
     except subprocess.TimeoutExpired:
         return f"Timed out describing job {job_id}."

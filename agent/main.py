@@ -9,6 +9,10 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from agent.config import bootstrap_config_env
+
+bootstrap_config_env()
+
 from agent.config import Settings, load_settings
 from agent.context import ContextAssembler
 from agent.cron import CronStore
@@ -90,13 +94,20 @@ async def run() -> None:
 
     await telegram_bot.start()
 
-    tasks = [
-        asyncio.create_task(orchestrator.process_loop(), name="process-loop"),
-        asyncio.create_task(orchestrator.heartbeat_loop(), name="heartbeat-loop"),
-        asyncio.create_task(orchestrator.self_improve_loop(), name="self-improve-loop"),
-    ]
+    import logging
+    _log = logging.getLogger(__name__)
+
+    loop_factories: dict[str, object] = {
+        "process-loop": orchestrator.process_loop,
+        "heartbeat-loop": orchestrator.heartbeat_loop,
+        "self-improve-loop": orchestrator.self_improve_loop,
+    }
     if cron_store is not None:
-        tasks.append(asyncio.create_task(orchestrator.cron_loop(), name="cron-loop"))
+        loop_factories["cron-loop"] = orchestrator.cron_loop
+
+    tasks: dict[str, asyncio.Task] = {}
+    for name, factory in loop_factories.items():
+        tasks[name] = asyncio.create_task(factory(), name=name)
 
     stop_event = asyncio.Event()
 
@@ -107,10 +118,34 @@ async def run() -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, _handle_stop)
 
+    must_run = {"process-loop", "cron-loop"}
+
+    async def _watchdog() -> None:
+        """Restart background tasks that die unexpectedly."""
+        while not stop_event.is_set():
+            await asyncio.sleep(10)
+            for name, t in list(tasks.items()):
+                if t.done() and not t.cancelled():
+                    try:
+                        exc = t.exception()
+                    except asyncio.CancelledError:
+                        continue
+                    if exc is not None:
+                        _log.error("Background task %r died: %s — restarting", name, exc)
+                    elif name in must_run:
+                        _log.warning("Critical task %r exited cleanly — restarting", name)
+                    else:
+                        continue
+                    factory = loop_factories[name]
+                    tasks[name] = asyncio.create_task(factory(), name=name)
+
+    watchdog_task = asyncio.create_task(_watchdog(), name="watchdog")
+
     await stop_event.wait()
-    for t in tasks:
+    watchdog_task.cancel()
+    for t in tasks.values():
         t.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
+    await asyncio.gather(watchdog_task, *tasks.values(), return_exceptions=True)
     await telegram_bot.stop()
     if browser_server is not None:
         await browser_server.stop()

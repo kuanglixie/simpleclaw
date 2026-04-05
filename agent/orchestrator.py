@@ -53,10 +53,23 @@ Your workspace is at {worklog_dir} which contains:
   index.md maps UUIDs to first-line summaries. Each .jsonl has one JSON \
   object per line with "role" and "message" fields.
 
+Key repos for code investigations (ALWAYS search multiple repos, not just worklog):
+- /Users/jing.lu/git_repos/ray-jobs — ML training code, model YAML configs, \
+  feature embeddings. Key: projects/two-tower/ (RFE), projects/biggraph/
+- /Users/jing.lu/git_repos/dw-airflow — Data pipelines, Gazette feature \
+  definitions, BQ export. Key: dags/ml_content/two_tower_unified_datasets/
+- /Users/jing.lu/git_repos/worklog/knowledge-base — Design docs, experiment notes
+
 CURSOR AGENT — YOUR PRIMARY TOOL:
 You have access to cursor_agent(), which delegates tasks to a full Cursor IDE \
 agent. The Cursor agent has file read/write, terminal, search, git, and ALL \
-MCP servers (GitHub, Jira, Glean, BigQuery, Playwright, etc.).
+MCP servers:
+- **GitHub**: PRs, issues, code search, CI status
+- **Glean**: Internal company docs, people search, Gmail, meetings, chat
+- **Atlassian/Jira**: Tickets, Confluence pages
+- **BigQuery**: Data warehouse queries
+- **Playwright**: Browser automation
+- **Fetch**: HTTP requests to any URL
 
 USE cursor_agent() for MOST tasks:
 - Code changes, edits, fixes, refactors in any repo
@@ -64,6 +77,8 @@ USE cursor_agent() for MOST tasks:
 - Multi-step investigations needing file/code access
 - GitHub PR operations (create, review, check CI)
 - Jira ticket operations (fetch, comment, transition)
+- **Searching internal docs/Glean**: "search Glean for X", "who works on Y", \
+  "check my email", "find docs about Z"
 - Running shell commands in a specific repo context
 - Daily log updates, experiment audits, research scans
 - STATUS CHECKS: "what's happening with X", "summarize my experiments", \
@@ -79,7 +94,7 @@ When calling cursor_agent(), write a DETAILED prompt. Include:
 - Any context from the user's message or conversation history
 
 Model selection for cursor_agent:
-- Always uses opus-4.6-thinking by default
+- Uses 'auto' by default (Cursor picks the best available model)
 - Override only if explicitly requested by the user
 
 Handle DIRECTLY (without cursor_agent) only:
@@ -97,14 +112,29 @@ it probably is. Re-do it via cursor_agent instead. For example: \
 delegate to cursor_agent so it can cross-reference TODO items, read experiment \
 configs, check multiple job statuses, and produce a real summary.
 
+Investigation tasks (CRITICAL):
+- When the user says "start work on X", "investigate X", or "look into X", \
+  you MUST delegate to cursor_agent with a detailed investigation prompt.
+- The prompt must include: what to search for, which repos to look in, \
+  what prior knowledge exists (from TODO detail), and what deliverable to produce.
+- NEVER respond with just "I have started the investigation" without results. \
+  The user expects concrete findings, not acknowledgments.
+- If cursor_agent returns results, pass them through. If it fails, say so \
+  explicitly: "Investigation failed: [reason]. I'll retry with [approach]."
+
 Other guidelines:
 - For scheduling, use cron_add, cron_list, cron_remove to manage recurring tasks.
 - For Ray job monitoring, use check_ray_jobs and ray_job_describe.
 - For submitting Ray jobs, use ray_job_submit. NEVER try to run adhoc_job.py \
   locally. Always submit via ray_job_submit(job_name=..., mode=...).
-- Use memory_write to persist important facts, preferences, or patterns you \
-  learn. Use memory_read to recall stored knowledge. Your memory survives \
-  across sessions and compaction — use it proactively.
+- **Two-layer memory system:**
+  - daily_note_write: Raw observations, decisions, context from today's work. \
+    Write freely — nightly consolidation promotes lasting facts to MEMORY.md.
+  - memory_write: For truly durable facts (new preferences, key decisions, \
+    new people). Deduplication is automatic — don't worry about duplicates.
+  - memory_read: Recall stored knowledge from MEMORY.md.
+  - daily_note_read_tool: Read a specific day's notes (for recent context).
+  Your memory survives across sessions and compaction — use it proactively.
 - Be concise in your final answers — they go to Telegram (4096 char limit).
 - When cursor_agent returns a result, pass it through as your answer. \
   Do NOT re-summarize or add preamble like "Here's what I found". The \
@@ -113,6 +143,8 @@ Other guidelines:
 - NEVER report factual claims about task status, PR merges, job progress, \
   pipeline states, or data backfills without first verifying via a tool call. \
   If your tools fail, say "I could not verify" rather than guessing.
+- NEVER return an empty response. If all tools fail, explain what happened \
+  and what you'll try next.
 
 Action execution rules (CRITICAL):
 - When the user asks you to FIX, UPDATE, or CHANGE something, delegate to \
@@ -185,13 +217,24 @@ class Orchestrator:
     # --- Task processing loop ---
 
     async def process_loop(self) -> None:
+        import logging
+        _log = logging.getLogger(__name__)
         while True:
-            task = await self.queue.dequeue_next()
-            started_at = _now_iso()
             try:
-                await self._execute_task(task, started_at)
-            except Exception as exc:  # noqa: BLE001
-                await self._handle_task_error(task, exc)
+                task = await self.queue.dequeue_next()
+                started_at = _now_iso()
+                try:
+                    await self._execute_task(task, started_at)
+                except Exception as exc:  # noqa: BLE001
+                    try:
+                        await self._handle_task_error(task, exc)
+                    except Exception:  # noqa: BLE001
+                        _log.exception("_handle_task_error itself failed for task %s", task.id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                _log.exception("process_loop iteration crashed, retrying in 5s")
+                await asyncio.sleep(5)
 
     async def _execute_task(self, task: Task, started_at: str) -> None:
         session_key = task.session_key or ""
@@ -241,10 +284,13 @@ class Orchestrator:
                 raise _SnoocodeFallback(raw)
 
             final_answer = raw.strip()
+            if not final_answer:
+                raise _SnoocodeFallback("SNOOCODE_UNREACHABLE: empty response from cursor agent")
+
             summary = _summary_from_text(final_answer)
             status = TaskStatus.COMPLETED
 
-        except _SnoocodeFallback:
+        except _SnoocodeFallback as fallback_exc:
             # --- Fallback: Gemini via PydanticAI ---
             model_used = self.settings.gemini_model
             user_prompt = f"{context_blob}\n\n---\nTask: {task.prompt}"
@@ -262,30 +308,47 @@ class Orchestrator:
                     ),
                 )
                 final_answer = str(result.output).strip()
-                summary = _summary_from_text(final_answer)
-                tool_records = _extract_tool_records(result)
-                status = TaskStatus.COMPLETED
+                if not final_answer:
+                    status = TaskStatus.FAILED
+                    errors.append("Gemini fallback produced empty response.")
+                    fallback_reason = str(fallback_exc).replace("SNOOCODE_UNREACHABLE:", "").strip()
+                    final_answer = (
+                        f"I couldn't complete this task — both execution paths "
+                        f"returned empty.\n\n"
+                        f"**Primary failure**: {fallback_reason[:200]}\n"
+                        f"**Fallback**: Gemini also returned empty.\n\n"
+                        f"Please try again, or rephrase your request with more detail."
+                    )
+                    summary = "Empty response from both execution paths."
+                else:
+                    summary = _summary_from_text(final_answer)
+                    tool_records = _extract_tool_records(result)
+                    status = TaskStatus.COMPLETED
 
             except UsageLimitExceeded:
                 status = TaskStatus.FAILED
                 errors.append(
                     f"Agent loop exceeded max steps ({self.settings.max_agent_steps}).",
                 )
-                final_answer = "Task did not converge within step limit."
+                final_answer = (
+                    f"Task hit the step limit ({self.settings.max_agent_steps} steps). "
+                    f"This usually means the task is too complex for a single pass. "
+                    f"Try breaking it into smaller pieces."
+                )
                 summary = "Task stopped at max agent steps."
 
             except (UnexpectedModelBehavior, Exception) as exc:  # noqa: BLE001
                 status = TaskStatus.FAILED
                 err_msg = str(exc).strip() or "Agent execution failed"
                 errors.append(err_msg)
-                final_answer = err_msg
+                final_answer = f"Task failed: {err_msg[:500]}"
                 summary = _summary_from_text(err_msg)
 
         except Exception as exc:  # noqa: BLE001
             status = TaskStatus.FAILED
             err_msg = str(exc).strip() or "Direct executor failed"
             errors.append(err_msg)
-            final_answer = err_msg
+            final_answer = f"Task failed: {err_msg[:500]}"
             summary = _summary_from_text(err_msg)
 
         # --- Heartbeat: suppress HEARTBEAT_OK responses ---
@@ -452,6 +515,29 @@ class Orchestrator:
             except Exception:  # noqa: BLE001
                 pass
 
+            try:
+                await self._run_memory_consolidation()
+            except Exception:  # noqa: BLE001
+                pass
+
+    # --- Memory consolidation ---
+
+    async def _run_memory_consolidation(self) -> None:
+        """Nightly memory consolidation: review daily notes, update MEMORY.md."""
+        from .consolidation import run_consolidation
+
+        result = await run_consolidation(
+            self.settings.worklog_dir,
+            model=self.settings.pydantic_ai_model,
+        )
+
+        chat_id = self._user_chat_id()
+        if chat_id and "complete" in result.lower():
+            await self.notifier.send_text(
+                chat_id,
+                f"🧠 Memory consolidation: {result}",
+            )
+
     # --- Cron job loop ---
 
     async def cron_loop(self) -> None:
@@ -463,7 +549,10 @@ class Orchestrator:
             try:
                 await asyncio.to_thread(self.cron_store.reload)
                 due = await asyncio.to_thread(get_due_jobs, self.cron_store)
+                inflight_cron_ids = set(self._pending_cron_tasks.values())
                 for job in due:
+                    if job.job_id in inflight_cron_ids:
+                        continue
                     task = Task(
                         id=new_task_id(),
                         source=f"cron:{job.name}",

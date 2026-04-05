@@ -161,8 +161,13 @@ async def _flush_to_memory(
     model: str,
     worklog_dir: Path | str,
 ) -> None:
-    """Pre-compaction memory flush: extract durable facts into MEMORY.md."""
-    from .tools.memory_ops import memory_write
+    """Pre-compaction memory flush: extract durable facts into daily notes.
+
+    Raw facts go to today's daily note (the "journal" layer). The nightly
+    consolidation process later promotes lasting insights to MEMORY.md.
+    This prevents MEMORY.md from accumulating duplicate/transient noise.
+    """
+    from .tools.daily_notes import daily_note_append
 
     conversation_text = _format_messages_for_summary(messages)
     prompt = (
@@ -191,11 +196,9 @@ async def _flush_to_memory(
     if not bullet_lines:
         return
 
-    memory_write(
+    daily_note_append(
         str(worklog_dir),
-        section="Key Facts",
-        content="\n".join(bullet_lines),
-        mode="append",
+        "### Compaction extract\n\n" + "\n".join(bullet_lines),
     )
 
 

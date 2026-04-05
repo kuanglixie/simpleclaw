@@ -23,7 +23,7 @@ from .self_improve import (
     append_evolution_log,
     extract_memory_updates,
 )
-from .tools import file_ops, memory_ops, ray_ops, search, shell, snoocode, todo, web
+from .tools import daily_notes, file_ops, memory_ops, ray_ops, search, shell, snoocode, todo, web
 
 _CURSOR_CONTEXT_MAX = 6000
 
@@ -50,6 +50,15 @@ Your response goes DIRECTLY to a Telegram chat. Format accordingly:
 - If there are actionable items, list them clearly at the end
 - Do NOT include internal reasoning, tool call logs, or "let me check" preamble
 - Do NOT say "here is a summary" — just give the summary directly
+- NEVER return an empty response. Always provide at least a status update or
+  explanation of what you found (even if it's "nothing relevant found because X").
+
+## Available MCP Servers
+The Cursor agent has access to these MCP servers — use them:
+- **Glean** (user-Glean_MCP_Server): search internal docs, people, Gmail, meetings
+- **GitHub** (user-GitHub): PRs, issues, code search
+- **Atlassian** (user-atlassian): Jira tickets, Confluence
+- **BigQuery** (user-bigquery): Data warehouse queries
 """
 
 
@@ -194,9 +203,19 @@ def create_agent(
     ) -> str:
         """Search file contents using ripgrep. Supports regex patterns.
 
+        IMPORTANT: Default path is worklog. For code investigations, you MUST
+        search the relevant repos explicitly:
+        - /Users/jing.lu/git_repos/ray-jobs — ML training code, model configs, feature definitions
+        - /Users/jing.lu/git_repos/dw-airflow — Data pipelines, Gazette features, dataset configs
+        - /Users/jing.lu/git_repos/worklog/knowledge-base — Design docs, experiment notes
+
+        Always search MULTIPLE repos when investigating a feature or codebase question.
+        For example, to investigate BigGraph features, search all three locations.
+
         Args:
             pattern: Regex pattern to search for.
             path: File or directory to search in. Defaults to worklog directory.
+                  Use specific repo paths for code searches.
             glob_filter: Optional glob to filter files, e.g. '*.py', '*.md'.
         """
         p = path or str(ctx.deps.worklog_dir)
@@ -431,6 +450,32 @@ def create_agent(
         )
 
     # ------------------------------------------------------------------
+    # Daily Notes (raw daily journal)
+    # ------------------------------------------------------------------
+
+    @agent.tool
+    def daily_note_write(ctx: RunContext[AgentDeps], content: str) -> str:
+        """Append a note to today's daily memory log (memory/YYYY-MM-DD.md).
+
+        Use for raw observations, decisions, and context from the current
+        conversation. These are automatically reviewed during nightly
+        consolidation — lasting facts get promoted to MEMORY.md.
+
+        Args:
+            content: The note content to append (markdown format).
+        """
+        return daily_notes.daily_note_append(str(ctx.deps.worklog_dir), content)
+
+    @agent.tool
+    def daily_note_read_tool(ctx: RunContext[AgentDeps], date: str = "") -> str:
+        """Read a daily memory note. Empty date reads today's note.
+
+        Args:
+            date: Date in YYYY-MM-DD format. Empty string reads today.
+        """
+        return daily_notes.daily_note_read(str(ctx.deps.worklog_dir), date=date)
+
+    # ------------------------------------------------------------------
     # Snoocode (dev workflow tools via local MCP server)
     # ------------------------------------------------------------------
 
@@ -549,12 +594,16 @@ def create_agent(
         ctx: RunContext[AgentDeps],
         prompt: str,
         workspace: str = "/Users/jing.lu/git_repos",
-        model: str = "opus-4.6-thinking",
+        model: str = "auto",
     ) -> str:
         """Delegate a task to the Cursor IDE agent. This is the most powerful
         tool available — the Cursor agent has full IDE access including file
-        read/write, terminal, search, git, and ALL MCP servers (GitHub, Jira,
-        Glean, BigQuery, etc.).
+        read/write, terminal, search, git, and ALL MCP servers:
+        - GitHub: PRs, issues, code search, CI status
+        - Glean: internal docs, people search, Gmail, meetings
+        - Atlassian/Jira: tickets, Confluence pages
+        - BigQuery: data warehouse queries
+        - Playwright: browser automation
 
         USE THIS for:
         - Any code changes, edits, refactors, or fixes
@@ -562,6 +611,8 @@ def create_agent(
         - Multi-step investigations that need file/code access
         - Running shell commands in a repo context
         - GitHub PR operations, CI debugging, Jira updates
+        - Searching internal docs via Glean ("search Glean for X")
+        - People lookups ("who works on X team")
         - Any task that benefits from IDE-level tool access
 
         Keep handling DIRECTLY (without cursor_agent) only:
@@ -575,7 +626,7 @@ def create_agent(
             workspace: Working directory for the agent. Default is ~/git_repos.
                 Use the specific repo path when possible (e.g.
                 '/Users/jing.lu/git_repos/ray-jobs').
-            model: Model to use. Default is opus-4.6-thinking.
+            model: Model to use. Default is 'auto' (Cursor picks best available).
         """
         full_prompt = _build_cursor_agent_prompt(prompt, ctx.deps.worklog_dir)
         return snoocode.run_agent(full_prompt, workspace=workspace, model=model)
