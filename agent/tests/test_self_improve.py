@@ -243,13 +243,22 @@ class TestGenerateImprovementIdeas:
         ideas = _generate_improvement_ideas(signals, [], [])
         assert any(">2 min" in idea for idea in ideas)
 
-    def test_no_cursor_agent_hint(self):
+    def test_no_cursor_agent_hint_when_tool_counts_empty(self):
+        """Persisted tool_calls missing → do not infer Cursor was skipped."""
+        signals = [
+            TaskSignal(f"t{i}", "", "completed", "", "", 30, [], 0, [], "")
+            for i in range(10)
+        ]
+        ideas = _generate_improvement_ideas(signals, [], [])
+        assert not any("cursor_agent was not used" in idea for idea in ideas)
+
+    def test_cursor_agent_hint_when_other_tools_recorded(self):
         signals = [
             TaskSignal(f"t{i}", "", "completed", "", "", 30, [], 0, [], "")
             for i in range(10)
         ]
         ideas = _generate_improvement_ideas(signals, [], [("run_shell", 5)])
-        assert any("cursor_agent" in idea for idea in ideas)
+        assert any("cursor_agent was not used" in idea for idea in ideas)
 
     def test_clean_day(self):
         signals = [

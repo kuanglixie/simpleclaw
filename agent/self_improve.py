@@ -190,8 +190,10 @@ def _generate_improvement_ideas(
             "Check job definitions in jobs.json and their prompts."
         )
 
+    # Only nudge when we have persisted tool usage: empty tool_counts means
+    # outbox JSON often omits tool_calls — not evidence that Cursor was skipped.
     tool_names = {name for name, _ in tool_counts}
-    if "cursor_agent" not in tool_names and len(signals) > 5:
+    if tool_names and "cursor_agent" not in tool_names and len(signals) > 5:
         ideas.append(
             "cursor_agent was not used today. For complex tasks, "
             "delegating to cursor_agent could improve quality."
