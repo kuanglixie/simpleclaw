@@ -1,49 +1,14 @@
-# Personal Agent Daemon
+# SimpleClaw Agent
 
-Telegram + PydanticAI personal assistant with tool-calling.
+Core Python package: Telegram bot, task queue, PydanticAI agent, and tools.
 
-## Architecture
-
-- Telegram messages enqueue tasks in SQLite.
-- A periodic heartbeat scheduler enqueues monitor tasks.
-- PydanticAI `Agent.run()` handles the full agentic loop with automatic tool dispatch.
-- Results are written to `.agent_mailbox/outbox/<task-id>.md` and `.json`.
-- Telegram receives completion/failure notifications.
-
-## Prerequisites
-
-- Python 3.10+
-- Telegram bot token from BotFather
-
-## Setup
-
-1. Install dependencies:
-
-```bash
-python3 -m pip install -r requirements.txt
-```
-
-2. Create config file:
-
-```bash
-mkdir -p ~/.config/worklog-agent
-cp config.env.example ~/.config/worklog-agent/config.env
-```
-
-3. Edit `~/.config/worklog-agent/config.env` and fill in Telegram values.
+See the [root README](../README.md) for full setup, commands, and configuration.
 
 ## Run
 
 ```bash
-python3 main.py
+python -m agent.main
 ```
-
-## Telegram usage
-
-- Send any text message to enqueue a task.
-- `/status` to list active tasks.
-- `/history` to view recent completed/failed tasks.
-- `/cancel <task_id>` to cancel a pending task.
 
 ## Output locations
 

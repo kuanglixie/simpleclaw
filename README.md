@@ -67,10 +67,10 @@ All settings are in `config.env`. Key options:
 | `TELEGRAM_BOT_TOKEN` | *(required)* | Bot token from BotFather |
 | `TELEGRAM_ALLOWED_USER_ID` | `0` | Restrict to this Telegram user ID (0 = allow all) |
 | `WORKLOG_DIR` | `~/worklog` | Path to your worklog directory |
-| `GEMINI_MODEL` | `gemini-2.5-pro` | Gemini model name |
+| `GEMINI_MODEL` | `gemini-3.1-pro` | Gemini model name |
 | `GOOGLE_GENAI_USE_VERTEXAI` | `false` | Use Vertex AI instead of free-tier |
 | `HEARTBEAT_EVERY_SECONDS` | `1800` | Heartbeat interval (30 min) |
-| `MAX_AGENT_STEPS` | `6` | Max tool-use steps per task |
+| `MAX_AGENT_STEPS` | `20` | Max tool-use steps per task |
 
 ## Data
 
