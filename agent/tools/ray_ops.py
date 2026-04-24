@@ -12,8 +12,11 @@ def _reddit_environ() -> dict[str, str]:
     env = os.environ.copy()
     extra_dirs = (
         "/opt/reddit/bin",
+        "/opt/homebrew/bin",
         str(Path.home() / ".local/bin"),
         "/usr/local/bin",
+        str(Path.home() / "google-cloud-sdk/bin"),
+        "/usr/local/google-cloud-sdk/bin",
     )
     existing = env.get("PATH", "")
     parts = [p for p in existing.split(":") if p]

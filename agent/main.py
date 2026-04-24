@@ -9,9 +9,10 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from agent.config import bootstrap_config_env
+from agent.config import augment_process_path_for_cli_tools, bootstrap_config_env
 
 bootstrap_config_env()
+augment_process_path_for_cli_tools()
 
 from agent.config import Settings, load_settings
 from agent.context import ContextAssembler
@@ -104,6 +105,12 @@ async def run() -> None:
     }
     if cron_store is not None:
         loop_factories["cron-loop"] = orchestrator.cron_loop
+    if settings.alerts_enabled:
+        loop_factories["alert-loop"] = orchestrator.alert_loop
+    if settings.quality_watchdog_enabled:
+        loop_factories["quality-watchdog-loop"] = (
+            orchestrator.quality_watchdog_loop
+        )
 
     tasks: dict[str, asyncio.Task] = {}
     for name, factory in loop_factories.items():

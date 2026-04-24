@@ -21,6 +21,31 @@ def bootstrap_config_env() -> None:
         os.environ.setdefault(key, value)
 
 
+def augment_process_path_for_cli_tools() -> None:
+    """Prepend common CLI dirs so launchd/cron agents find ``gazette``, ``gcloud``, brew.
+
+    ``bootstrap_config_env`` may set ``PATH`` from ``config.env``; this still runs
+    afterward so missing or minimal daemon ``PATH`` values get Reddit + Homebrew
+    + Google Cloud SDK locations when those directories exist.
+    """
+    candidates = (
+        "/opt/reddit/bin",
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        str(Path.home() / ".local" / "bin"),
+        str(Path.home() / "google-cloud-sdk" / "bin"),
+        "/usr/local/google-cloud-sdk/bin",
+    )
+    existing = os.environ.get("PATH", "")
+    parts = [p for p in existing.split(":") if p]
+    prepend: list[str] = []
+    for d in candidates:
+        if Path(d).is_dir() and d not in parts and d not in prepend:
+            prepend.append(d)
+    if prepend:
+        os.environ["PATH"] = ":".join(prepend + parts)
+
+
 def _read_env_file(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     if not path.exists():
@@ -81,6 +106,16 @@ class Settings:
     browser_server_host: str
     browser_server_port: int
     browser_server_token: str
+    # Proactive alerts (auth/permission blockers)
+    alerts_enabled: bool
+    alerts_poll_seconds: int
+    auth_prologue_enabled: bool
+    # Quality watchdog — scans recent outbox for pathologies, emits
+    # rate-limited DEGRADED alerts and writes findings to
+    # ``{mailbox}/watchdog_findings.md``.
+    quality_watchdog_enabled: bool
+    quality_watchdog_interval_seconds: int
+    quality_watchdog_lookback_seconds: int
 
 
 def load_settings() -> Settings:
@@ -145,6 +180,19 @@ def load_settings() -> Settings:
     browser_port = _safe_int(_env(file_env, "BROWSER_SERVER_PORT", "18790"), 18790)
     browser_token = _env(file_env, "BROWSER_SERVER_TOKEN", "")
 
+    alerts_enabled = _env(file_env, "ALERTS_ENABLED", "true").lower() in ("true", "1", "yes")
+    alerts_poll = _safe_int(_env(file_env, "ALERTS_POLL_SECONDS", "3"), 3)
+    auth_prologue_enabled = _env(file_env, "AUTH_PROLOGUE_ENABLED", "true").lower() in ("true", "1", "yes")
+    quality_watchdog_enabled = _env(
+        file_env, "QUALITY_WATCHDOG_ENABLED", "true",
+    ).lower() in ("true", "1", "yes")
+    quality_watchdog_interval = _safe_int(
+        _env(file_env, "QUALITY_WATCHDOG_INTERVAL_SECONDS", "600"), 600,
+    )
+    quality_watchdog_lookback = _safe_int(
+        _env(file_env, "QUALITY_WATCHDOG_LOOKBACK_SECONDS", "21600"), 21600,
+    )
+
     gemini_model = _env(file_env, "GEMINI_MODEL", "gemini-3.1-pro")
     prefix = "google-vertex" if use_vertexai else "google-gla"
     pai_model = _env(file_env, "PYDANTIC_AI_MODEL", f"{prefix}:{gemini_model}")
@@ -186,6 +234,12 @@ def load_settings() -> Settings:
         browser_server_host=browser_host,
         browser_server_port=browser_port,
         browser_server_token=browser_token,
+        alerts_enabled=alerts_enabled,
+        alerts_poll_seconds=max(1, alerts_poll),
+        auth_prologue_enabled=auth_prologue_enabled,
+        quality_watchdog_enabled=quality_watchdog_enabled,
+        quality_watchdog_interval_seconds=max(60, quality_watchdog_interval),
+        quality_watchdog_lookback_seconds=max(600, quality_watchdog_lookback),
     )
 
 
