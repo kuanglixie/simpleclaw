@@ -146,6 +146,28 @@ def _count_tools(signals: list[TaskSignal]) -> list[tuple[str, int]]:
     return sorted(counts.items(), key=lambda x: -x[1])[:15]
 
 
+def _signals_show_gcloud_path_issue(signals: list[TaskSignal]) -> bool:
+    """True if failures look like gcloud missing from PATH (daemon/cron env)."""
+    for sig in signals:
+        if sig.status != "failed":
+            continue
+        for err in sig.errors:
+            el = err.lower()
+            if "gcloud" not in el:
+                continue
+            if "path" in el or "not found" in el or "command not found" in el:
+                return True
+    return False
+
+
+def _failure_patterns_show_gcloud_path_issue(patterns: list[str]) -> bool:
+    for p in patterns:
+        pl = p.lower()
+        if "gcloud" in pl and ("path" in pl or "not found" in pl):
+            return True
+    return False
+
+
 def _generate_improvement_ideas(
     signals: list[TaskSignal],
     failure_patterns: list[str],
@@ -164,9 +186,29 @@ def _generate_improvement_ideas(
     slow = [s for s in signals if s.duration_seconds > 120]
     if slow:
         names = ", ".join(s.source for s in slow[:3])
+        failed_count = len(failed)
+        n = len(signals) if signals else 1
+        failure_ceiling = max(1, n // 10)
+        all_slow_completed = all(s.status == "completed" for s in slow)
+        if all_slow_completed and failed_count <= failure_ceiling:
+            ideas.append(
+                f"{len(slow)} tasks took >2 min but completed (sources: {names}). "
+                "Likely normal load/variance when failure count stays low — "
+                "not necessarily a regression; skip splitting unless failures rise."
+            )
+        else:
+            ideas.append(
+                f"{len(slow)} tasks took >2 min. Slowest sources: {names}. "
+                "Consider breaking into smaller steps or adding timeouts."
+            )
+
+    if _signals_show_gcloud_path_issue(signals) or _failure_patterns_show_gcloud_path_issue(
+        failure_patterns
+    ):
         ideas.append(
-            f"{len(slow)} tasks took >2 min. Slowest sources: {names}. "
-            "Consider breaking into smaller steps or adding timeouts."
+            "gcloud failures look like CLI not on PATH (cron/launchd stripped env). "
+            "Fix host PATH for SimpleClaw (e.g. Homebrew / google-cloud-sdk bin dirs) "
+            "— separate from Gazette's `/opt/reddit/bin` requirement."
         )
 
     heartbeat_fails = [

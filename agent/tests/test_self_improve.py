@@ -242,6 +242,41 @@ class TestGenerateImprovementIdeas:
         ]
         ideas = _generate_improvement_ideas(signals, [], [])
         assert any(">2 min" in idea for idea in ideas)
+        assert any("variance" in idea.lower() or "regression" in idea.lower() for idea in ideas)
+
+    def test_slow_tasks_harsh_when_failures_high(self):
+        """Many failures → keep the break-up / timeout hint, not the variance gloss."""
+        signals = (
+            [TaskSignal("slow", "heavy", "completed", "", "", 200, [], 0, [], "")]
+            + [
+                TaskSignal(f"f{i}", "", "failed", "", "", 10, [], 1, ["err"], "")
+                for i in range(5)
+            ]
+        )
+        ideas = _generate_improvement_ideas(signals, [], [])
+        assert any("breaking into smaller steps" in idea for idea in ideas)
+        assert not any(
+            "not necessarily a regression" in idea for idea in ideas
+        )
+
+    def test_gcloud_path_failure_suggests_host_path(self):
+        signals = [
+            TaskSignal(
+                "t1", "telegram", "failed", "", "", 10, [], 1,
+                ["[gcloud] gcloud CLI not on PATH"], "",
+            ),
+        ]
+        ideas = _generate_improvement_ideas(signals, [], [])
+        assert any("gcloud" in idea.lower() and "path" in idea.lower() for idea in ideas)
+        assert any("simpleclaw" in idea.lower() for idea in ideas)
+
+    def test_gcloud_path_from_failure_patterns(self):
+        ideas = _generate_improvement_ideas(
+            [],
+            ["[gcloud] gcloud CLI not on PATH (x2)"],
+            [],
+        )
+        assert any("gcloud" in idea.lower() for idea in ideas)
 
     def test_no_cursor_agent_hint_when_tool_counts_empty(self):
         """Persisted tool_calls missing → do not infer Cursor was skipped."""
